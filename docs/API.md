@@ -17,7 +17,7 @@ All endpoints use the dashboard origin. JSON successes use `{ "data": ... }`. JS
 | GET | `/api/repositories/:id` | Returns metadata for the GitHub repository ID when accessible. |
 | POST | `/api/repositories/sync` | Refreshes access and metadata. Returns `lastSync` and `total`. |
 
-POST endpoints accept no request body and require an `Origin` matching `APP_BASE_URL`. Stale access snapshots return empty lists and 404 for details until a successful sync.
+All mutations require an `Origin` matching `APP_BASE_URL`. Tag creation and updates accept JSON. Other mutations accept no request body. Stale access snapshots return empty lists and 404 for details until a successful sync.
 
 ## Repository list parameters
 
@@ -35,3 +35,18 @@ POST endpoints accept no request body and require an `Origin` matching `APP_BASE
 Repository metadata includes the immutable GitHub `id`, owner, name, full name, description, GitHub URL, visibility, language, stars, forks, issue count, default branch, GitHub timestamps, archived and fork flags, and the metadata sync timestamp. GitHub's open issue count can include open pull requests.
 
 Common error statuses include 400 for invalid input, 401 for missing or expired authorization, 403 for denied access or an origin check, 404 for missing or inaccessible repository IDs, 405 for unsupported methods, 409 for concurrent sync or refresh, 429 for throttling, and 503 for temporary GitHub errors. A 429 response includes `Retry-After` in seconds.
+
+## Personal repository tags
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET | `/api/tags` | Lists the signed-in user's tags. |
+| POST | `/api/tags` | Creates a tag and returns HTTP 201. |
+| PATCH | `/api/tags/:id` | Updates an owned tag's name and color. |
+| DELETE | `/api/tags/:id` | Deletes an owned tag and its assignments. |
+| PUT | `/api/repositories/:id/tags/:tagId` | Assigns an owned tag to an accessible repository. |
+| DELETE | `/api/repositories/:id/tags/:tagId` | Removes that assignment. |
+
+Tag creation and updates accept JSON with `name` (1–60 characters after trimming) and `color` (`#RRGGBB`). Names must be unique per user after Unicode normalization and lowercasing. Duplicate names return HTTP 409. All mutations require the configured origin. Tag operations on an inaccessible repository or another user's tag return HTTP 404.
+
+Repository list, detail, and overview results include each repository's `tags` array with `id`, `name`, `color`, and `created_at`. To filter the repository list, repeat the `tag` query parameter for each selected ID. Use `tagMode=any` (default) or `tagMode=all`. Tag filtering combines with search and other filters before pagination. Up to 100 tag IDs may be supplied.

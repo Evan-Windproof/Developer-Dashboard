@@ -182,3 +182,19 @@ dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
   .filters label:not(.search) { flex: 1 1 120px; }
   .filters select { width: 100%; }
 }
+.tag-badges, .tag-choices, .tag-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tag-badges { margin-top: 6px; gap: 4px; }
+.tag-badge { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; overflow-wrap: anywhere; }
+.tag-badge svg { flex: none; }
+.tag-choices { min-width: 0; border: 1px solid var(--border); margin: 10px 0; padding: 8px; border-radius: 6px; }
+.tag-choices label { display: inline-flex; align-items: center; gap: 4px; }
+.tag-filter { padding: 0 13px 10px; font-size: 13px; }
+.tag-filter summary { cursor: pointer; width: fit-content; }
+.tag-filter > label { display: block; margin-top: 8px; }
+.tag-form { margin: 12px 0; }
+.tag-form label { display: grid; gap: 3px; font-size: 13px; max-width: 100%; }
+.tag-form input { max-width: 100%; }
+.tag-manager-list { list-style: none; display: grid; gap: 6px; padding: 0; }
+.tag-manager-list li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tag-manager-list .tag-badge { margin-right: auto; }
+dialog { max-height: calc(100dvh - 32px); overflow: auto; }

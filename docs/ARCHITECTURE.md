@@ -34,3 +34,9 @@ Foreign keys ensure per-user grants refer to both a user-installation associatio
 Cached grants expire after 15 minutes to bound stale visibility. A successful sync revalidates the grant list. Temporary network errors can leave the previous snapshot accessible through the rest of its lifetime.
 
 The sync runs in one request with a deadline. Accounts spanning many installations or pages may reach Cloudflare invocation, D1 query, or GitHub limits. App installations that return a confirmed access denial can cause a sync to fail until access is corrected. Phase 1 keeps synchronization user-initiated. Queue-based sync and revocation events are candidates for later work.
+
+## Personal tags
+
+Migration `0002_repository_tags.sql` adds `tags` and `repository_tags` to the existing D1 database. A composite foreign key ties each assignment to a tag owned by the same user. Tag deletion cascades to assignments. Repository reads and assignment writes still require the caller's current repository grant.
+
+Sync updates GitHub metadata and replaces access grants. Tag assignments point to stable repository IDs, so syncing or temporarily losing access leaves the assignments intact. The dashboard shows those assignments again if access returns.

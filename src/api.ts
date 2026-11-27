@@ -6,7 +6,15 @@ export interface Account {
   display_name: string | null
 }
 
+export interface Tag {
+  id: number
+  name: string
+  color: string
+  created_at: string
+}
+
 export interface Repository {
+  tags: Tag[]
   id: number
   owner: string
   name: string
@@ -53,7 +61,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(path, {
       ...init,
-      headers: { 'X-Dashboard-Request': '1' },
+      headers: { 'X-Dashboard-Request': '1', ...(init?.body ? { 'Content-Type': 'application/json' } : {}) },
     })
   } catch (error) {
     if (init?.signal?.aborted) throw error

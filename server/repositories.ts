@@ -10,6 +10,29 @@ const accessible = `FROM (
 ) authorized JOIN repositories r ON r.id = authorized.repository_id WHERE 1 = 1`
 const cutoff = () => new Date(Date.now() - accessLifetime * 1000).toISOString()
 
+const taggedRepository = `r.*, (
+  SELECT json_group_array(json_object('id', t.id, 'name', t.name, 'color', t.color, 'created_at', t.created_at))
+  FROM repository_tags rt JOIN tags t ON t.id = rt.tag_id AND t.user_id = rt.user_id
+  WHERE rt.repository_id = r.id AND rt.user_id = ?
+) AS tag_json`
+
+function withTags({ tag_json, ...repository }: Record<string, unknown>) {
+  return { ...repository, tags: JSON.parse(String(tag_json)) }
+}
+
+export async function setRepositoryTag(env: Env, current: Session, repoId: number, tagId: number, assigned: boolean) {
+  const eligibility = `SELECT r.id ${accessible} AND r.id = ? AND EXISTS (SELECT 1 FROM tags WHERE user_id = ? AND id = ?)`
+  const values = [current.id, cutoff(), repoId, current.id, tagId]
+  const mutation = assigned
+    ? env.DB.prepare(`INSERT OR IGNORE INTO repository_tags (user_id, repository_id, tag_id) SELECT ?, r.id, ? ${accessible}
+        AND r.id = ? AND EXISTS (SELECT 1 FROM tags WHERE user_id = ? AND id = ?)`).bind(current.id, tagId, ...values)
+    : env.DB.prepare(`DELETE FROM repository_tags WHERE user_id = ? AND repository_id = ? AND tag_id = ?
+        AND EXISTS (${eligibility})`).bind(current.id, repoId, tagId, ...values)
+  const [eligible] = await env.DB.batch([env.DB.prepare(eligibility).bind(...values), mutation])
+  if (!eligible.results.length) throw new ApiError(404, 'TAG_ASSIGNMENT_NOT_FOUND', 'Repository or tag not found.')
+  return { assigned }
+}
+
 export const snapshotExpired = (lastSync: string | null) => Boolean(lastSync && lastSync <= cutoff())
 
 function installationStatement(env: Env, installation: Installation) {
@@ -170,18 +193,31 @@ export async function repositoryList(env: Env, current: Session, params: URLSear
   if (archived) { filters.push('r.archived = ?'); values.push(Number(archived === 'true')) }
   if (fork) { filters.push('r.fork = ?'); values.push(Number(fork === 'true')) }
   if (language) { filters.push('r.language = ? COLLATE NOCASE'); values.push(language) }
+  const tagMode = choice(params, 'tagMode', ['any', 'all']) ?? 'any'
+  const selected = params.getAll('tag')
+  if (selected.length > 100 || selected.some(id => !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id)))) {
+    throw new ApiError(400, 'INVALID_QUERY', 'Invalid tag selection.')
+  }
+  const tagIds = [...new Set(selected.map(Number))]
+  if (tagIds.length) {
+    const matches = `SELECT 1 FROM repository_tags WHERE user_id = ? AND repository_id = r.id
+      AND tag_id IN (SELECT value FROM json_each(?))`
+    filters.push(tagMode === 'all' ? `(SELECT COUNT(*) FROM (${matches})) = ?` : `EXISTS (${matches})`)
+    values.push(current.id, JSON.stringify(tagIds))
+    if (tagMode === 'all') values.push(tagIds.length)
+  }
   const from = filters.length ? `${accessible} AND ${filters.join(' AND ')}` : accessible
   const [count, results] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total ${from}`).bind(...values),
-    env.DB.prepare(`SELECT r.* ${from} ORDER BY ${ordering[sort]}, r.id LIMIT ? OFFSET ?`).bind(...values, pageSize, (page - 1) * pageSize),
+    env.DB.prepare(`SELECT ${taggedRepository} ${from} ORDER BY ${ordering[sort]}, r.id LIMIT ? OFFSET ?`).bind(current.id, ...values, pageSize, (page - 1) * pageSize),
   ])
-  return { repositories: results.results, total: Number((count as D1Result<{ total: number }>).results[0].total), page, pageSize }
+  return { repositories: (results.results as Record<string, unknown>[]).map(withTags), total: Number((count as D1Result<{ total: number }>).results[0].total), page, pageSize }
 }
 
 export async function repositoryDetail(env: Env, current: Session, id: number) {
-  const row = await env.DB.prepare(`SELECT r.* ${accessible} AND r.id = ?`).bind(current.id, cutoff(), id).first()
+  const row = await env.DB.prepare(`SELECT ${taggedRepository} ${accessible} AND r.id = ?`).bind(current.id, current.id, cutoff(), id).first<Record<string, unknown>>()
   if (!row) throw new ApiError(404, 'REPOSITORY_NOT_FOUND', 'Repository not found.')
-  return row
+  return withTags(row)
 }
 
 export async function overview(env: Env, current: Session) {
@@ -190,11 +226,11 @@ export async function overview(env: Env, current: Session) {
     env.DB.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(r.visibility = 'public'), 0) AS public,
       COALESCE(SUM(r.visibility = 'private'), 0) AS private, COALESCE(SUM(r.archived), 0) AS archived,
       COALESCE(SUM(r.stars), 0) AS stars, COALESCE(SUM(r.forks), 0) AS forks ${accessible}`).bind(...values),
-    env.DB.prepare(`SELECT r.* ${accessible} ORDER BY r.updated_at DESC, r.id LIMIT 5`).bind(...values),
+    env.DB.prepare(`SELECT ${taggedRepository} ${accessible} ORDER BY r.updated_at DESC, r.id LIMIT 5`).bind(current.id, ...values),
     env.DB.prepare(`SELECT DISTINCT r.language ${accessible} AND r.language IS NOT NULL ORDER BY r.language COLLATE NOCASE`).bind(...values),
   ])
   return {
-    stats: stats.results[0], recent: recent.results, languages: (languages as D1Result<{ language: string }>).results.map(row => row.language),
+    stats: stats.results[0], recent: (recent.results as Record<string, unknown>[]).map(withTags), languages: (languages as D1Result<{ language: string }>).results.map(row => row.language),
     lastSync: current.last_sync, accessExpired: snapshotExpired(current.last_sync),
   }
 }

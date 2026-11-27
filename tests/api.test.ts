@@ -54,6 +54,9 @@ before(async () => {
   const migration = await readFile(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8')
   // Use D1's transactional batch so SQLite runs the production migration and constraints.
   await db.batch(migration.split(';').map(statement => statement.trim()).filter(Boolean).map(statement => db.prepare(statement)))
+  await db.prepare("INSERT INTO users (github_id, login) VALUES (999, 'phase-one-user')").run()
+  const tagsMigration = await readFile(new URL('../migrations/0002_repository_tags.sql', import.meta.url), 'utf8')
+  await db.batch(tagsMigration.split(';').map(statement => statement.trim()).filter(Boolean).map(statement => db.prepare(statement)))
   env = {
     DB: db, APP_BASE_URL: origin, GITHUB_APP_SLUG: 'example-dashboard',
     GITHUB_APP_ID: '1', GITHUB_CLIENT_ID: 'mock-client-id', GITHUB_CLIENT_SECRET: 'mock-client-secret',
@@ -114,6 +117,7 @@ after(async () => {
 
 function request(path: string, options: { cookie?: string; method?: string; origin?: string; dashboard?: boolean; body?: string } = {}) {
   const headers = new Headers()
+  if (options.body) headers.set('Content-Type', 'application/json')
   if (options.cookie) headers.set('Cookie', options.cookie)
   if (options.origin) headers.set('Origin', options.origin)
   if (options.dashboard) headers.set('X-Dashboard-Request', '1')
@@ -161,6 +165,7 @@ const get = (path: string, cookie = authCookieA) => request(path, { cookie })
 test('migration applies, health responds, and D1 rejects invalid relationships', async () => {
   const health = await request('/api/health')
   assert.equal(health.status, 200)
+  assert.equal(await db.prepare('SELECT login FROM users WHERE github_id = 999').first('login'), 'phase-one-user')
   assert.equal(health.headers.get('Cache-Control'), 'no-store')
   await assert.rejects(db.prepare('INSERT INTO user_installations VALUES (42, 101)').run(), /FOREIGN KEY/)
 })
@@ -251,6 +256,73 @@ test('repository list searches descriptions, escapes wildcards, combines filters
   }
   assert.equal((await get('/api/repositories?sort=credits')).status, 400)
   assert.equal((await get('/api/repositories?pageSize=101')).status, 400)
+})
+
+test('owned tags support editing, multi-assignment, filters, removal, and cascading deletion', async () => {
+  type Tag = { id: number; name: string; color: string; created_at: string }
+  const mutate = (path: string, method: string, payload?: object, cookie = authCookieA, requestOrigin = origin) =>
+    request(path, { method, cookie, origin: requestOrigin, body: payload && JSON.stringify(payload) })
+  const draft = { name: 'Systems', color: '#2d88ad' }
+  const created = await mutate('/api/tags', 'POST', draft)
+  assert.equal(created.status, 201)
+  const { data: systems } = await body<{ data: Tag }>(created)
+  assert.ok(systems.created_at)
+  assert.equal(systems.color, '#2D88AD')
+  assert.equal((await mutate('/api/tags', 'POST', { ...draft, name: ' systems ' })).status, 409)
+  assert.equal((await mutate('/api/tags', 'POST', { ...draft, color: 'red' })).status, 400)
+  assert.equal((await mutate('/api/tags', 'POST', draft, authCookieA, 'https://example.net')).status, 403)
+  assert.equal((await request('/api/tags')).status, 401)
+  const { data: research } = await body<{ data: Tag }>(await mutate('/api/tags', 'POST', { ...draft, name: 'Research' }))
+  const { data: bobTag } = await body<{ data: Tag }>(await mutate('/api/tags', 'POST', draft, authCookieB))
+  const sharedGrant = `INSERT INTO user_repository_access
+    SELECT id, 101, 501 FROM users WHERE login = 'bob'`
+  await db.prepare(sharedGrant).run()
+  const readTags = async (repoId: number, cookie = authCookieA) =>
+    (await body<{ data: { tags: Tag[] } }>(await get(`/api/repositories/${repoId}`, cookie))).data.tags
+
+  const patch = await mutate(`/api/tags/${systems.id}`, 'PATCH', { name: 'Operating Systems', color: '#00FF00' })
+  assert.equal(patch.status, 200)
+  assert.equal((await body<{ data: Tag }>(patch)).data.name, 'Operating Systems')
+  assert.equal((await mutate(`/api/tags/${systems.id}`, 'PATCH', draft, authCookieB)).status, 404)
+  assert.equal((await mutate(`/api/tags/${systems.id}`, 'DELETE', undefined, authCookieB)).status, 404)
+  assert.equal((await mutate(`/api/repositories/503/tags/${systems.id}`, 'PUT')).status, 404)
+  assert.equal((await mutate(`/api/repositories/501/tags/${bobTag.id}`, 'PUT')).status, 404)
+  const bobList = await body<{ data: Tag[] }>(await get('/api/tags', authCookieB))
+  assert.deepEqual(bobList.data.map(tag => tag.id), [bobTag.id])
+
+  for (const [repo, tag] of [[501, systems.id], [501, research.id], [502, research.id], [501, systems.id]]) {
+    assert.equal((await mutate(`/api/repositories/${repo}/tags/${tag}`, 'PUT')).status, 200)
+  }
+  assert.deepEqual((await readTags(501)).map(tag => [tag.name, tag.color]), [
+    ['Operating Systems', '#00FF00'], ['Research', '#2D88AD'],
+  ])
+  assert.deepEqual(await readTags(501, authCookieB), [])
+
+  const query = `tag=${systems.id}&tag=${research.id}&tag=${research.id}`
+  for (const [mode, ids] of [['any', [501, 502]], ['all', [501]]] as const) {
+    const result = await body<Results>(await get(`/api/repositories?${query}&tagMode=${mode}`))
+    assert.deepEqual(result.data.repositories.map(row => row.id), ids)
+  }
+  const bobFiltered = await body<Results>(await get(`/api/repositories?${query}`, authCookieB))
+  assert.equal(bobFiltered.data.total, 0)
+
+  await resetSync()
+  userARepos = [second]
+  assert.equal((await sync(authCookieA)).status, 200)
+  assert.equal((await get('/api/repositories/501')).status, 404)
+  assert.equal((await mutate(`/api/repositories/501/tags/${systems.id}`, 'DELETE')).status, 404)
+  await resetSync()
+  userARepos = [first, second]
+  assert.equal((await sync(authCookieA)).status, 200)
+  assert.equal((await readTags(501)).length, 2)
+  assert.equal((await mutate(`/api/repositories/501/tags/${systems.id}`, 'DELETE')).status, 200)
+  assert.deepEqual((await readTags(501)).map(tag => tag.id), [research.id])
+  assert.equal((await mutate(`/api/tags/${research.id}`, 'DELETE')).status, 200)
+  assert.deepEqual(await readTags(501), [])
+  assert.deepEqual(await readTags(502), [])
+  assert.equal((await get('/api/repositories/501')).status, 200)
+  await db.prepare(`DELETE FROM user_repository_access WHERE repository_id = 501
+    AND user_id = (SELECT id FROM users WHERE login = 'bob')`).run()
 })
 
 test('temporary failures preserve a successful snapshot, rate limits back off, and reruns remove revoked repos per user', async () => {

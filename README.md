@@ -2,12 +2,13 @@
 
 Evan Developer Dashboard is an open-source workspace for browsing GitHub repositories across personal and organization installations. Each developer signs in with their own GitHub account and sees the repositories they can access through the dashboard's GitHub App.
 
-## Phase 1 features
+## Features
 
 - GitHub sign-in and installation verification for personal accounts and organizations.
 - Manual repository synchronization with pagination, progress feedback, rate-limit handling, and the last successful sync time.
 - Overview with repository counts, stars, forks, and recently updated repositories.
 - Search, filters, sorting, pagination, and repository details.
+- Personal tags with custom colors, multiple tags per repository, and any/all tag filters.
 - Responsive layout with light and dark themes, plus initial system preference detection.
 
 ## Architecture
@@ -39,7 +40,9 @@ npm run build
 curl -fsS http://localhost:8788/api/health
 ```
 
-The test suite uses the real migration in an isolated local D1 database and mocked GitHub requests. It needs no GitHub credentials. The health check exercises the configured D1 binding after `npm run dev` starts.
+For an existing local database, run `npm run db:local` to apply the additive tag migration. Restart the app, sign in, and sync your repositories. On **Repositories**, open **Manage tags** to create two tags. Assign both in a repository's details, then use **Filter by tags** to compare any/all results. Sync again and check the badges. Deleting a tag removes its assignments while keeping the repositories.
+
+The test suite uses the real migrations in an isolated local D1 database and mocked GitHub requests. It needs no GitHub credentials. The health check exercises the configured D1 binding after `npm run dev` starts.
 
 ## Configuration
 
