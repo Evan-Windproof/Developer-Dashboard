@@ -1,6 +1,6 @@
 # Architecture
 
-Cloudflare Pages hosts the Vite build. The Pages Function at `functions/api/[[route]].ts` dispatches the same-origin REST API to TypeScript modules in `server/`. D1 holds persistent data. The React client uses the dashboard API for all account and repository data.
+Cloudflare Workers serves the Vite build from static assets. Requests for `/api` and `/api/*` run the Worker at `server/worker.ts`, which delegates to the same-origin REST API. D1 holds persistent data. The React client uses the dashboard API for all account and repository data.
 
 | Module | Responsibility |
 | --- | --- |

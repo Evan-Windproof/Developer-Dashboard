@@ -11,5 +11,5 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["src", "server", "functions", "tests"]
+  "include": ["src", "server", "tests"]
 }

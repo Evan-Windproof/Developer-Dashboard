@@ -14,7 +14,7 @@ Grant the GitHub App repository Metadata read-only and leave other permissions u
 
 The API receives GitHub user tokens and uses AES-256-GCM with a fresh random nonce for each write. The internal user ID is authenticated as additional data. D1 stores ciphertext and nonce. A database lease serializes expiring token refreshes, and a conditional write protects against replacing newer credentials. GitHub installation tokens stay in memory for one sync. App signing keys and client secrets stay in Cloudflare secrets and local ignored config files.
 
-Back up the encryption key securely. Changing it requires a credential migration or invalidation of the previous encrypted credentials and new GitHub sign-ins. Revoke a compromised GitHub private key or client secret in GitHub and update the corresponding Pages secret.
+Back up the encryption key securely. Changing it requires a credential migration or invalidation of the previous encrypted credentials and new GitHub sign-ins. Revoke a compromised GitHub private key or client secret in GitHub and update the corresponding Worker secret.
 
 ## Authorization
 

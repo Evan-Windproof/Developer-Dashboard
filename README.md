@@ -13,7 +13,7 @@ Evan Developer Dashboard is an open-source workspace for browsing GitHub reposit
 
 ## Architecture
 
-React, TypeScript, Vite, and CSS power the frontend. Cloudflare Pages serves the built assets and runs the same-origin REST API through Pages Functions on the Workers runtime. Cloudflare D1 stores sessions, encrypted GitHub user credentials, repository metadata, and per-user access. The GitHub REST API supplies all repository data.
+React, TypeScript, Vite, and CSS power the frontend. Cloudflare Workers serves the built assets and runs the same-origin REST API. Cloudflare D1 stores sessions, encrypted GitHub user credentials, repository metadata, and per-user access. The GitHub REST API supplies all repository data.
 
 See [architecture](docs/ARCHITECTURE.md), [security](docs/SECURITY.md), and the [REST API](docs/API.md).
 
@@ -32,7 +32,7 @@ npm run db:local
 npm run dev
 ```
 
-Fill in `.dev.vars` before trying GitHub sign-in. Generate the encryption key with `openssl rand -base64 32`. Open `http://localhost:8788` so the app origin, cookie host, and registered callback match. Rerun `npm run build` to rebuild frontend assets after editing them. Wrangler watches changes to the Pages Functions.
+Fill in `.dev.vars` before trying GitHub sign-in. Generate the encryption key with `openssl rand -base64 32`. Open `http://localhost:8788` so the app origin, cookie host, and registered callback match. Rerun `npm run build` to rebuild frontend assets after editing them. Wrangler watches changes to the Worker.
 
 ```sh
 npm test
@@ -52,22 +52,17 @@ The test suite uses the real migrations in an isolated local D1 database and moc
 | `GITHUB_APP_SLUG` | App slug used for the installation URL | Wrangler `[vars]` |
 | `GITHUB_CLIENT_ID` | GitHub App OAuth client ID | Wrangler `[vars]` |
 | `GITHUB_APP_ID` | Numeric GitHub App ID for signing app JWTs | Wrangler `[vars]` |
-| `GITHUB_CLIENT_SECRET` | GitHub App OAuth client secret | Pages secret |
-| `GITHUB_PRIVATE_KEY` | GitHub App RSA private key, PEM | Pages secret |
-| `SESSION_ENCRYPTION_KEY` | Base64-encoded 32-byte key for GitHub credentials | Pages secret |
+| `GITHUB_CLIENT_SECRET` | GitHub App OAuth client secret | Worker secret |
+| `GITHUB_PRIVATE_KEY` | GitHub App RSA private key, PEM | Worker secret |
+| `SESSION_ENCRYPTION_KEY` | Base64-encoded 32-byte key for GitHub credentials | Worker secret |
 
 Use `.dev.vars` for local values. `GITHUB_PRIVATE_KEY` accepts an unencrypted RSA PEM with matching `RSA PRIVATE KEY` (PKCS#1) or `PRIVATE KEY` (PKCS#8) boundaries. Use actual LF or Windows CRLF line endings, or escaped `\n` or `\r\n` in a single-line variable. Keep the GitHub private key outside the repository.
 
-## Cloudflare Pages deployment
+## Cloudflare Workers production
 
-1. Pick a stable HTTPS origin and use it when registering the production [GitHub App](docs/GITHUB-APP-SETUP.md). Use a separate App and D1 database for development or staging.
-2. Authenticate Wrangler with `npx wrangler login`. Create the Pages project with `npx wrangler pages project create evan-developer-dashboard --production-branch main` and create the database with `npx wrangler d1 create evan-developer-dashboard`. Use your existing resources if available. Match the project and database names in `wrangler.toml`.
-3. Replace the placeholder `database_id` in `wrangler.toml`. Keep the binding named `DB`. Under `[vars]`, set the production `APP_BASE_URL`, `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, and `GITHUB_APP_ID`. Keep local overrides in `.dev.vars`.
-4. Add `GITHUB_CLIENT_SECRET`, `GITHUB_PRIVATE_KEY`, and `SESSION_ENCRYPTION_KEY` under the Pages project's **Settings → Variables and Secrets** for production. Use **Secret** for each value.
-5. Apply migrations with `npm run db:remote`. Deploy with `npm run deploy -- --branch main`. The deployment includes `dist`, the Pages Functions, and the configured D1 binding.
-6. If you use a custom domain, attach it to the Pages project and verify HTTPS. Check `/api/health`, sign in on the exact configured origin, install for a selected set of repos, and sync. Verify that a second GitHub account only sees its own authorized repositories.
+The `production` environment targets `https://dashboard.evanwindproof.top` and uses a separate D1 database and Worker secrets. The default local environment uses `http://localhost:8788`, the existing local D1 persistence, and `.dev.vars`.
 
-For preview deployments that need GitHub login, provision a distinct App, HTTPS origin, D1 database, and secrets. Follow [Cloudflare Pages configuration documentation](https://developers.cloudflare.com/pages/functions/wrangler-configuration/).
+Phase 3.1 prepares the configuration. See the [production runbook](docs/PRODUCTION.md) for required values, domain and GitHub App setup, the migration audit, and the steps for an authorized Phase 3.2 deployment. See the [tag transfer procedure](docs/TAG-TRANSFER.md) to carry over personal tags without transferring sessions or credentials.
 
 ## Security
 
