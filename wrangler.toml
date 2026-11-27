@@ -30,8 +30,7 @@ run_worker_first = ["/api", "/api/*"]
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "evan-developer-dashboard-prod"
-# Replace this marker with the ID returned by Cloudflare before using remote commands.
-database_id = "REPLACE_WITH_PRODUCTION_D1_ID"
+database_id = "0e6ddcb9-9340-4613-8773-6331ba97844b"
 migrations_dir = "migrations"
 
 [env.production.vars]

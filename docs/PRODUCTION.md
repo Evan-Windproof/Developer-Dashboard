@@ -14,8 +14,8 @@ Wrangler sends `/api` and `/api/*` to the Worker before static asset handling. O
 
 ## Phase 3.2 order of operations
 
-1. Authenticate with `npx wrangler login`. Run `npx wrangler d1 list` and confirm the Cloudflare account and database. If the production database is missing, run `npx wrangler d1 create evan-developer-dashboard-prod --env production --update-config=false` and record the returned UUID.
-2. In `wrangler.toml`, replace `REPLACE_WITH_PRODUCTION_D1_ID` with the real database ID returned by Cloudflare. Under `[env.production.vars]`, set the GitHub App's `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, and numeric `GITHUB_APP_ID` as strings. Keep `APP_BASE_URL` set to the exact HTTPS origin. `OAUTH_DIAGNOSTICS` is optional and defaults to disabled.
+1. Authenticate with `npx wrangler login`. Run `npx wrangler d1 info evan-developer-dashboard-prod --env production` to confirm the Cloudflare account and the existing APAC database. Its ID is `0e6ddcb9-9340-4613-8773-6331ba97844b`.
+2. Confirm that the returned ID matches the `DB` binding under `[[env.production.d1_databases]]` in `wrangler.toml`. Under `[env.production.vars]`, set the GitHub App's `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, and numeric `GITHUB_APP_ID` as strings. Keep `APP_BASE_URL` set to the exact HTTPS origin. `OAUTH_DIAGNOSTICS` is optional and defaults to disabled.
 3. Review the custom domain and GitHub App settings below. Apply the schema with `npx wrangler d1 migrations apply DB --env production --remote`, then confirm the migration list with `npx wrangler d1 migrations list DB --env production --remote`.
 4. Provision the production Worker and configure its secrets using the commands below. Confirm the deployed Worker has all three secrets before attempting sign-in.
 5. Run `npm run build`, then `npx wrangler deploy --env production`. Verify the domain's TLS certificate, load the dashboard, call `/api/health`, and exercise sign-in, installation and sync. Confirm an account with no grant cannot access another user's private repositories. Use the [tag transfer procedure](TAG-TRANSFER.md) if retaining local tags.
