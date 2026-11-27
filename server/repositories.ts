@@ -145,6 +145,10 @@ export async function synchronize(env: Env, current: Session) {
           }
         }
       } catch (error) {
+        if (operation === 'user_repository_list' && error instanceof ApiError && error.code === 'GITHUB_REAUTH') {
+          stage = operation
+          throw error
+        }
         let failure = error instanceof ApiError ? error
           : new ApiError(503, 'GITHUB_UNAVAILABLE', 'GitHub returned an unreadable repository response.')
         if (operation === 'installation_repository_list' && failure.code === 'GITHUB_REAUTH') {
@@ -226,7 +230,7 @@ export async function synchronize(env: Env, current: Session) {
         .bind(seconds() + error.retryAfter, current.id, lock).run()
     }
     if (error instanceof ApiError && error.code === 'GITHUB_REAUTH' &&
-        (stage === 'account_credentials' || stage === 'installation_discovery')) {
+        (stage === 'account_credentials' || stage === 'installation_discovery' || stage === 'user_repository_list')) {
       await env.DB.prepare(`DELETE FROM user_installations WHERE user_id = ?
         AND EXISTS (SELECT 1 FROM users WHERE id = ? AND sync_lock = ?)`).bind(current.id, current.id, lock).run()
     }

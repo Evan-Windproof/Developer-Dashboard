@@ -383,6 +383,29 @@ test('sync isolates two installations, retains the original expiry, and preserve
     const logs = JSON.stringify([...info.mock.calls, ...warn.mock.calls].map(call => call.arguments))
     for (const value of [accessA, accessB, installToken, env.GITHUB_CLIENT_SECRET]) assert.ok(!logs.includes(value))
 
+    secondInstallationFailure = undefined
+    const previousFetch = globalThis.fetch
+    let rejectInstallationToken = true
+    const installationFetch = t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.hostname === 'api.github.com' && url.pathname === '/installation/repositories' && rejectInstallationToken) {
+        rejectInstallationToken = false
+        return fakeResponse({}, 401)
+      }
+      return previousFetch(input, init)
+    })
+    try {
+      const partial = await syncAlice()
+      assert.equal(partial.status, 'partial')
+      assert.deepEqual(partial.installations, { succeeded: 1, failed: 1 })
+      assert.equal((await get('/api/repositories/501')).status, 200)
+      assert.equal((await get('/api/repositories/503')).status, 200)
+      assert.ok(warn.mock.calls.some(call =>
+        (call.arguments[1] as { code?: string }).code === 'GITHUB_INSTALLATION_TOKEN'))
+    } finally {
+      installationFetch.mock.restore()
+    }
+
     secondInstallationFailure = 429
     await resetSync()
     const throttled = await sync(authCookieA)
@@ -433,6 +456,68 @@ test('sync isolates two installations, retains the original expiry, and preserve
     await resetSync()
     await sync(authCookieA)
   }
+})
+
+test('a rejected user OAuth token aborts sync, clears only that user’s grants, and permits recovery', async t => {
+  const previousFetch = globalThis.fetch
+  const finalInstallation = { ...installation, id: 105 }
+  const requestedInstallations: number[] = []
+  let rejectUserToken = false
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input))
+    const authorization = new Headers(init?.headers).get('Authorization')
+    if (url.hostname === 'api.github.com' && authorization === `Bearer ${accessA}`) {
+      if (url.pathname === '/user/installations') {
+        return fakeResponse({ installations: [installation, otherInstallation, finalInstallation] })
+      }
+      const match = /^\/user\/installations\/(\d+)\/repositories$/.exec(url.pathname)
+      if (match) {
+        const id = Number(match[1])
+        requestedInstallations.push(id)
+        if (id === otherInstallation.id && rejectUserToken) return fakeResponse({}, 401)
+        return fakeResponse({ repositories: id === installation.id ? [first] : id === otherInstallation.id ? [second] : [] })
+      }
+    }
+    return previousFetch(input, init)
+  })
+
+  const countFor = (table: 'user_installations' | 'user_repository_access', login: string) =>
+    db.prepare(`SELECT COUNT(*) AS total FROM ${table} WHERE user_id = (SELECT id FROM users WHERE login = ?)`)
+      .bind(login).first<number>('total')
+  await resetSync()
+  const initial = await sync(authCookieA)
+  assert.equal(initial.status, 200, await initial.clone().text())
+  const { data: { lastSync } } = await body<{ data: { lastSync: string } }>(initial)
+  assert.equal(await countFor('user_installations', 'alice'), 3)
+  assert.equal(await countFor('user_repository_access', 'alice'), 2)
+  assert.equal(await countFor('user_installations', 'bob'), 1)
+  assert.equal(await countFor('user_repository_access', 'bob'), 1)
+
+  rejectUserToken = true
+  requestedInstallations.length = 0
+  await resetSync()
+  const rejected = await sync(authCookieA)
+  assert.equal(rejected.status, 401)
+  assert.deepEqual(await body(rejected), { error: { code: 'GITHUB_REAUTH', message: 'Reconnect your GitHub account.' } })
+  assert.deepEqual(requestedInstallations, [installation.id, otherInstallation.id])
+  assert.equal(await countFor('user_installations', 'alice'), 0)
+  assert.equal(await countFor('user_repository_access', 'alice'), 0)
+  assert.equal(await countFor('user_installations', 'bob'), 1)
+  assert.equal(await countFor('user_repository_access', 'bob'), 1)
+  assert.equal((await get('/api/repositories/501')).status, 404)
+  assert.equal((await get('/api/repositories/502')).status, 404)
+  assert.equal((await get('/api/repositories/503', authCookieB)).status, 200)
+  assert.deepEqual(await db.prepare("SELECT sync_lock, last_sync FROM users WHERE login = 'alice'").first(), {
+    sync_lock: null, last_sync: lastSync,
+  })
+
+  rejectUserToken = false
+  await resetSync()
+  const recovered = await sync(authCookieA)
+  assert.equal(recovered.status, 200, await recovered.clone().text())
+  assert.equal(await countFor('user_installations', 'alice'), 3)
+  assert.equal((await get('/api/repositories/501')).status, 200)
+  assert.equal((await get('/api/repositories/502')).status, 200)
 })
 
 test('temporary failures preserve a successful snapshot, rate limits back off, and reruns remove revoked repos per user', async () => {
