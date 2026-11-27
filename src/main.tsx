@@ -357,7 +357,7 @@ function App() {
           <span>{snapshot?.lastSync ? `Last successful sync · ${date(snapshot.lastSync)}` : 'No successful sync yet'}</span></div>
         {message && <Notice kind="info">{message}</Notice>}
         {callbackError && <Notice>{callbackError}</Notice>}
-        {failure && <Notice>{failure.message} {failure.code === 'GITHUB_REAUTH' && <a href={loginUrl}>Reconnect GitHub</a>}</Notice>}
+        {failure && <Notice>{failure.message} {['GITHUB_REAUTH', 'GITHUB_CREDENTIALS_UNREADABLE'].includes(failure.code) && <a href={loginUrl}>Reconnect GitHub</a>}</Notice>}
         {page === 'overview' ? <>
           <div className="metrics">{metrics.map(({ key, label, icon: Icon, color }) => <div className="metric" key={key}>
             <span className={`metric-icon ${color}`}><Icon size={17} /></span>

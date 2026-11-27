@@ -194,18 +194,50 @@ function der(tag: number, body: Uint8Array) {
   return Uint8Array.of(tag, ...prefix, ...body)
 }
 
-async function appJwt(env: Env) {
-  const pem = env.GITHUB_PRIVATE_KEY.replaceAll('\\n', '\n')
-  const keyBytes = bytes(pem.replace(/-----[^-]+-----|\s/g, ''))
-  const pkcs8 = pem.includes('BEGIN RSA PRIVATE KEY')
+function appKeyError(reason: 'pem_format' | 'pem_base64' | 'rsa_import' | 'jwt_sign') {
+  console.warn('GitHub credential diagnostic', { stage: 'app_jwt', reason })
+  return new ApiError(503, 'GITHUB_APP_CONFIG', reason === 'jwt_sign'
+    ? 'The GitHub App could not sign an installation request. Check GITHUB_PRIVATE_KEY.'
+    : 'Set GITHUB_PRIVATE_KEY to a complete, unencrypted RSA private key in PKCS#1 or PKCS#8 PEM format.')
+}
+
+async function appSigningKey(value: string | undefined) {
+  const pem = value?.replace(/\\r\\n|\\n|\r\n/g, '\n').trim() ?? ''
+  const match = /^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----\n([\s\S]+)\n-----END \1-----$/.exec(pem)
+  if (!match) throw appKeyError('pem_format')
+
+  const encoded = match[2].replace(/[ \t\n]/g, '')
+  // Bound the DER wrapper and require a complete, standard PEM Base64 payload.
+  if (!encoded || encoded.length > 16384 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw appKeyError('pem_base64')
+  }
+  let keyBytes: Uint8Array<ArrayBuffer>
+  try {
+    keyBytes = bytes(encoded)
+  } catch {
+    throw appKeyError('pem_base64')
+  }
+  const pkcs8 = match[1] === 'RSA PRIVATE KEY'
     ? der(0x30, Uint8Array.of(2, 1, 0, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, ...der(4, keyBytes)))
     : keyBytes
-  const key = await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])
+  try {
+    return await crypto.subtle.importKey('pkcs8', pkcs8, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])
+  } catch {
+    throw appKeyError('rsa_import')
+  }
+}
+
+async function appJwt(env: Env) {
+  const key = await appSigningKey(env.GITHUB_PRIVATE_KEY)
   const now = seconds()
   const encode = (value: object) => base64url(encoder.encode(JSON.stringify(value)))
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: now - 60, exp: now + 540, iss: env.GITHUB_APP_ID })}`
-  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, encoder.encode(unsigned))
-  return `${unsigned}.${base64url(new Uint8Array(signature))}`
+  try {
+    const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, encoder.encode(unsigned))
+    return `${unsigned}.${base64url(new Uint8Array(signature))}`
+  } catch {
+    throw appKeyError('jwt_sign')
+  }
 }
 
 export async function installationToken(env: Env, id: number) {

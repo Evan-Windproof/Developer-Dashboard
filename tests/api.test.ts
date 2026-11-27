@@ -4,6 +4,7 @@ import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare'
 import { handleApi } from '../server/api.ts'
+import { installationToken } from '../server/github.ts'
 import { hash, seconds, type Env } from '../server/core.ts'
 
 const origin = 'https://dashboard.example'
@@ -418,4 +419,82 @@ test('GitHub redirects are rejected without forwarding the OAuth request', async
   const response = await loginReturn(await loginStart())
   assert.equal(response.headers.get('Location'), '/?login-error=GITHUB_UNAVAILABLE')
   assert.deepEqual(requests, ['https://github.com/login/oauth/access_token'])
+})
+
+test('installation JWTs sign correctly with PKCS#1 and PKCS#8 across PEM newline formats', async () => {
+  for (const type of ['pkcs1', 'pkcs8'] as const) {
+    const pem = keys.privateKey.export({ type, format: 'pem' }).toString()
+    for (const separator of ['\n', '\r\n', '\\n', '\\r\\n']) {
+      const privateKey = pem.replaceAll('\n', separator)
+      // The GitHub mock verifies the JWT signature against the matching public key.
+      assert.equal(await installationToken({ ...env, GITHUB_PRIVATE_KEY: privateKey }, 101), installToken)
+    }
+  }
+})
+
+test('sync reports malformed signing keys, encryption configuration, and stored credentials separately', async t => {
+  const warning = t.mock.method(console, 'warn', () => {})
+  const login = await loginReturn(await loginStart())
+  assert.equal(login.headers.get('Location'), '/')
+  const sessionCookie = findCookie(login, 'dashboard_session')
+  const savedKey = env.GITHUB_PRIVATE_KEY
+  const savedEncryptionKey = env.SESSION_ENCRYPTION_KEY
+  const stored = await db.prepare(`
+    SELECT user_id, encrypted FROM github_credentials
+    WHERE user_id = (SELECT id FROM users WHERE login = 'alice')
+  `).first<{ user_id: number; encrypted: string }>()
+  assert.ok(stored)
+  const assertSyncError = async (status: number, code: string, message: RegExp) => {
+    await resetSync()
+    const response = await sync(sessionCookie)
+    assert.equal(response.status, status)
+    const error = (await body<{ error: { code: string; message: string } }>(response)).error
+    assert.equal(error.code, code)
+    assert.match(error.message, message)
+  }
+  const badPem = (label: string, content: string, end = label) =>
+    `-----BEGIN ${label}-----\n${content}\n-----END ${end}-----`
+  const marker = 'malformed-test-input!'
+  const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey
+    .export({ type: 'pkcs8', format: 'pem' }).toString()
+
+  try {
+    const mintCalls = calls.filter(path => path === '/app/installations/101/access_tokens').length
+    for (const privateKey of [
+      '',
+      badPem('PRIVATE KEY', 'AAAA', 'RSA PRIVATE KEY'),
+      badPem('ENCRYPTED PRIVATE KEY', 'AAAA'),
+      badPem('PRIVATE KEY', marker),
+      badPem('RSA PRIVATE KEY', 'AAAA'),
+      ec,
+    ]) {
+      env.GITHUB_PRIVATE_KEY = privateKey
+      await assertSyncError(503, 'GITHUB_APP_CONFIG', /GITHUB_PRIVATE_KEY/)
+    }
+    assert.equal(calls.filter(path => path === '/app/installations/101/access_tokens').length, mintCalls)
+    env.GITHUB_PRIVATE_KEY = savedKey
+
+    for (const encryptionKey of [marker, 'AAAA']) {
+      env.SESSION_ENCRYPTION_KEY = encryptionKey
+      await assertSyncError(503, 'SESSION_ENCRYPTION_CONFIG', /SESSION_ENCRYPTION_KEY/)
+    }
+    env.SESSION_ENCRYPTION_KEY = Buffer.alloc(32, 31).toString('base64')
+    await assertSyncError(401, 'GITHUB_CREDENTIALS_UNREADABLE', /Reconnect/)
+    env.SESSION_ENCRYPTION_KEY = savedEncryptionKey
+
+    await db.prepare('UPDATE github_credentials SET encrypted = ? WHERE user_id = ?').bind(marker, stored.user_id).run()
+    await assertSyncError(401, 'GITHUB_CREDENTIALS_UNREADABLE', /Reconnect/)
+    assert.deepEqual(warning.mock.calls.map(call => call.arguments), [
+      ...['pem_format', 'pem_format', 'pem_format', 'pem_base64', 'rsa_import', 'rsa_import'].map(reason =>
+        ['GitHub credential diagnostic', { stage: 'app_jwt', reason }]),
+      ...Array.from({ length: 2 }, () =>
+        ['GitHub credential diagnostic', { stage: 'credential_encryption_key', reason: 'invalid_key' }]),
+      ...Array.from({ length: 2 }, () =>
+        ['GitHub credential diagnostic', { stage: 'credential_decryption', reason: 'unreadable_credential' }]),
+    ])
+  } finally {
+    env.GITHUB_PRIVATE_KEY = savedKey
+    env.SESSION_ENCRYPTION_KEY = savedEncryptionKey
+    await db.prepare('UPDATE github_credentials SET encrypted = ? WHERE user_id = ?').bind(stored.encrypted, stored.user_id).run()
+  }
 })

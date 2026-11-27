@@ -33,9 +33,14 @@ export const base64url = (value: Uint8Array) =>
 const decodeUrl = (value: string) => bytes(value.replaceAll('-', '+').replaceAll('_', '/'))
 
 async function encryptionKey(env: Env) {
-  const key = bytes(env.SESSION_ENCRYPTION_KEY)
-  if (key.length !== 32) throw new Error('Invalid encryption key length')
-  return crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  try {
+    const key = bytes(env.SESSION_ENCRYPTION_KEY)
+    if (key.length !== 32) throw new Error('Invalid encryption key length')
+    return await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  } catch {
+    console.warn('GitHub credential diagnostic', { stage: 'credential_encryption_key', reason: 'invalid_key' })
+    throw new ApiError(503, 'SESSION_ENCRYPTION_CONFIG', 'Set SESSION_ENCRYPTION_KEY to a Base64-encoded 32-byte key.')
+  }
 }
 
 export async function encrypt(env: Env, userId: number, value: unknown) {
@@ -48,12 +53,19 @@ export async function encrypt(env: Env, userId: number, value: unknown) {
 }
 
 export async function decrypt<T>(env: Env, userId: number, value: string): Promise<T> {
-  const [iv, ciphertext] = value.split('.')
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: decodeUrl(iv), additionalData: encoder.encode(String(userId)) },
-    await encryptionKey(env), decodeUrl(ciphertext),
-  )
-  return JSON.parse(new TextDecoder().decode(plaintext)) as T
+  const key = await encryptionKey(env)
+  try {
+    const match = /^([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{22,})$/.exec(value)
+    if (!match) throw new Error('Invalid encrypted credential envelope')
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: decodeUrl(match[1]), additionalData: encoder.encode(String(userId)) },
+      key, decodeUrl(match[2]),
+    )
+    return JSON.parse(new TextDecoder().decode(plaintext)) as T
+  } catch {
+    console.warn('GitHub credential diagnostic', { stage: 'credential_decryption', reason: 'unreadable_credential' })
+    throw new ApiError(401, 'GITHUB_CREDENTIALS_UNREADABLE', 'Stored GitHub credentials could not be read. Reconnect your GitHub account.')
+  }
 }
 
 export function appOrigin(env: Env) {

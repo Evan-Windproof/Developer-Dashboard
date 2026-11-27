@@ -53,7 +53,7 @@ The test suite uses the real migration in an isolated local D1 database and mock
 | `GITHUB_PRIVATE_KEY` | GitHub App RSA private key, PEM | Pages secret |
 | `SESSION_ENCRYPTION_KEY` | Base64-encoded 32-byte key for GitHub credentials | Pages secret |
 
-Use `.dev.vars` for local values. The key loader accepts a PEM with literal line breaks or escaped `\n` separators. Keep the GitHub private key outside the repository.
+Use `.dev.vars` for local values. `GITHUB_PRIVATE_KEY` accepts an unencrypted RSA PEM with matching `RSA PRIVATE KEY` (PKCS#1) or `PRIVATE KEY` (PKCS#8) boundaries. Use actual LF or Windows CRLF line endings, or escaped `\n` or `\r\n` in a single-line variable. Keep the GitHub private key outside the repository.
 
 ## Cloudflare Pages deployment
 
