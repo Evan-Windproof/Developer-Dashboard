@@ -41,6 +41,10 @@ let calls: string[] = []
 let userARepos = [first, second]
 let githubFailure: 'none' | 'network' | 'rate' | 'denied' = 'none'
 let expireUserToken = false
+let discoverSecondInstallation = false
+let secondInstallationRepos = [third]
+let failSecondInstallationToken = false
+let secondInstallationFailure: 403 | 404 | 429 | 'network' | undefined
 let appRepoPages = [[first], [second, third]]
 let holdDiscovery: (() => Promise<void>) | undefined
 
@@ -88,14 +92,23 @@ before(async () => {
       if (githubFailure === 'network') throw new Error('offline')
       if (githubFailure === 'rate') return Response.json({}, { status: 429, headers: { 'Retry-After': '120' } })
       if (githubFailure === 'denied') return fakeResponse({}, 401)
-      return fakeResponse({ installations: [installation] })
+      return fakeResponse({ installations: discoverSecondInstallation && alice ? [otherInstallation, installation] : [installation] })
     }
     if (url.pathname === '/user/installations/101/repositories') {
       return fakeResponse({ repositories: alice ? userARepos : [third] })
     }
-    if (url.pathname === '/app/installations/101/access_tokens') {
+    if (url.pathname === '/user/installations/103/repositories') {
+      if (secondInstallationFailure === 'network') throw new Error('offline')
+      if (secondInstallationFailure === 429) {
+        return Response.json({}, { status: 429, headers: { 'Retry-After': '120' } })
+      }
+      if (secondInstallationFailure) return fakeResponse({}, secondInstallationFailure)
+      return fakeResponse({ repositories: secondInstallationRepos })
+    }
+    if (/^\/app\/installations\/(101|103)\/access_tokens$/.test(url.pathname)) {
       assert.equal(init?.method, 'POST')
       assert.deepEqual(JSON.parse(String(init?.body)), { permissions: { metadata: 'read' } })
+      if (url.pathname.includes('/103/') && failSecondInstallationToken) return fakeResponse({}, 403)
       const [header, payload, signature] = auth!.slice(7).split('.')
       assert.equal(JSON.parse(Buffer.from(payload, 'base64url').toString()).iss, '1')
       assert.equal(verify('RSA-SHA256', Buffer.from(`${header}.${payload}`), createPublicKey(keys.privateKey), Buffer.from(signature, 'base64url')), true)
@@ -325,6 +338,103 @@ test('owned tags support editing, multi-assignment, filters, removal, and cascad
     AND user_id = (SELECT id FROM users WHERE login = 'bob')`).run()
 })
 
+test('sync isolates two installations, retains the original expiry, and preserves tags on revocation and recovery', async t => {
+  const info = t.mock.method(console, 'info', () => {})
+  const warn = t.mock.method(console, 'warn', () => {})
+  const syncAlice = async () => {
+    await resetSync()
+    const response = await sync(authCookieA)
+    assert.equal(response.status, 200, await response.clone().text())
+    return (await body<{ data: {
+      status: string; total: number; lastSync: string; installations: { succeeded: number; failed: number }
+    } }>(response)).data
+  }
+  const lastSync = new Date(Date.now() - 10 * 60_000).toISOString()
+  const setLastSync = (value: string) =>
+    db.prepare("UPDATE users SET last_sync = ? WHERE login = 'alice'").bind(value).run()
+  const mutate = (path: string, method: string, payload?: object) =>
+    request(path, { method, cookie: authCookieA, origin, body: payload && JSON.stringify(payload) })
+  discoverSecondInstallation = true
+  let tagId: number | undefined
+  try {
+    const initial = await syncAlice()
+    assert.equal(initial.status, 'complete')
+    assert.deepEqual(initial.installations, { succeeded: 2, failed: 0 })
+    assert.equal(initial.total, 3)
+    const created = await mutate('/api/tags', 'POST', { name: 'Availability', color: '#123456' })
+    assert.equal(created.status, 201)
+    tagId = (await body<{ data: { id: number } }>(created)).data.id
+    assert.equal((await mutate(`/api/repositories/503/tags/${tagId}`, 'PUT')).status, 200)
+
+    await setLastSync(lastSync)
+    for (const fail of [403, 404, 'network'] as const) {
+      secondInstallationFailure = fail
+      const partial = await syncAlice()
+      assert.equal(partial.status, 'partial')
+      assert.equal(partial.lastSync, lastSync)
+      assert.deepEqual(partial.installations, { succeeded: 1, failed: 1 })
+      assert.equal(partial.total, 2)
+      assert.equal((await get('/api/repositories/501')).status, 200)
+      assert.equal((await get('/api/repositories/503')).status, 200)
+    }
+    assert.ok(info.mock.calls.some(call => call.arguments[0] === 'Repository sync finished' &&
+      (call.arguments[1] as { outcome?: string }).outcome === 'partial'))
+    assert.ok(warn.mock.calls.some(call => (call.arguments[1] as { code?: string }).code === 'GITHUB_ACCESS'))
+    const logs = JSON.stringify([...info.mock.calls, ...warn.mock.calls].map(call => call.arguments))
+    for (const value of [accessA, accessB, installToken, env.GITHUB_CLIENT_SECRET]) assert.ok(!logs.includes(value))
+
+    secondInstallationFailure = 429
+    await resetSync()
+    const throttled = await sync(authCookieA)
+    assert.equal(throttled.status, 429)
+    assert.equal(throttled.headers.get('Retry-After'), '120')
+    assert.equal((await get('/api/repositories/501')).status, 200)
+    assert.equal((await get('/api/repositories/503')).status, 200)
+
+    await setLastSync(new Date(Date.now() - 16 * 60_000).toISOString())
+    secondInstallationFailure = 'network'
+    assert.equal((await syncAlice()).status, 'partial')
+    assert.equal((await get('/api/repositories/503')).status, 404)
+
+    // A completed user listing also confirms removed repository grants when minting fails.
+    secondInstallationFailure = undefined
+    secondInstallationRepos = [first]
+    failSecondInstallationToken = true
+    const confirmedRemoval = await syncAlice()
+    assert.equal(confirmedRemoval.status, 'partial')
+    assert.equal((await get('/api/repositories/501')).status, 200)
+    assert.equal((await get('/api/repositories/503')).status, 404)
+    assert.equal(await db.prepare(`SELECT COUNT(*) AS grants FROM user_repository_access
+      WHERE installation_id = 103 AND user_id = (SELECT id FROM users WHERE login = 'alice')`).first('grants'), 0)
+
+    secondInstallationRepos = [third]
+    failSecondInstallationToken = false
+    await syncAlice()
+    assert.equal((await get('/api/repositories/503')).status, 200)
+    // A complete discovery response omitting the installation confirms access loss.
+    discoverSecondInstallation = false
+    const revoked = await syncAlice()
+    assert.equal(revoked.status, 'complete')
+    assert.equal((await get('/api/repositories/501')).status, 200)
+    assert.equal((await get('/api/repositories/503')).status, 404)
+    assert.equal((await get('/api/repositories/503', authCookieB)).status, 200)
+
+    secondInstallationFailure = undefined
+    discoverSecondInstallation = true
+    await syncAlice()
+    const recovered = await body<{ data: { tags: { id: number }[] } }>(await get('/api/repositories/503'))
+    assert.ok(recovered.data.tags.some(tag => tag.id === tagId))
+  } finally {
+    secondInstallationRepos = [third]
+    failSecondInstallationToken = false
+    if (tagId) await mutate(`/api/tags/${tagId}`, 'DELETE')
+    discoverSecondInstallation = false
+    secondInstallationFailure = undefined
+    await resetSync()
+    await sync(authCookieA)
+  }
+})
+
 test('temporary failures preserve a successful snapshot, rate limits back off, and reruns remove revoked repos per user', async () => {
   await resetSync()
   githubFailure = 'network'
@@ -361,6 +471,59 @@ test('stale snapshots and confirmed revocations stop serving repository data', a
   assert.equal((await get('/api/repositories/502')).status, 404)
   assert.equal((await get('/api/repositories/503', authCookieB)).status, 200)
   githubFailure = 'none'
+})
+
+test('a replaced sync cannot overwrite installation metadata, grants, or freshness', { timeout: 5000 }, async t => {
+  await resetSync()
+  const waiting = Promise.withResolvers<void>()
+  const resume = Promise.withResolvers<void>()
+  const previousFetch = globalThis.fetch
+  let oldRun = true
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input))
+    if (url.hostname !== 'api.github.com') return previousFetch(input, init)
+    if (url.pathname === '/user/installations') {
+      const entry = oldRun
+        ? { ...installation, account: { ...installation.account, login: 'old-name' }, repository_selection: 'all' }
+        : { ...installation, account: { ...installation.account, login: 'new-name' } }
+      return fakeResponse({ installations: [entry] })
+    }
+    if (url.pathname === '/user/installations/101/repositories') {
+      if (oldRun) {
+        waiting.resolve()
+        await resume.promise
+        return fakeResponse({ repositories: [second] })
+      }
+      return fakeResponse({ repositories: [first] })
+    }
+    return previousFetch(input, init)
+  })
+  const stale = sync(authCookieA)
+  try {
+    await Promise.race([
+      waiting.promise,
+      stale.then(response => assert.fail(`Original sync returned ${response.status} before the pause`)),
+    ])
+    oldRun = false
+    await db.prepare("UPDATE users SET sync_started = ? WHERE login = 'alice' AND sync_lock IS NOT NULL")
+      .bind(seconds() - 181).run()
+    const replacement = await sync(authCookieA)
+    assert.equal(replacement.status, 200, await replacement.clone().text())
+    const { data } = await body<{ data: { lastSync: string } }>(replacement)
+    resume.resolve()
+    const rejected = await stale
+    assert.equal(rejected.status, 409)
+    assert.equal((await body<{ error: { code: string } }>(rejected)).error.code, 'SYNC_REPLACED')
+    assert.deepEqual(await db.prepare('SELECT account_name, repository_selection FROM installations WHERE id = 101').first(), {
+      account_name: 'new-name', repository_selection: 'selected',
+    })
+    assert.equal(await db.prepare("SELECT last_sync FROM users WHERE login = 'alice'").first('last_sync'), data.lastSync)
+    assert.equal((await get('/api/repositories/501')).status, 200)
+    assert.equal((await get('/api/repositories/502')).status, 404)
+  } finally {
+    resume.resolve()
+    await stale
+  }
 })
 
 test('a 250-repository sync builds a coherent snapshot and rejects a concurrent sync', { timeout: 5000 }, async () => {
@@ -556,7 +719,7 @@ test('sync reports malformed signing keys, encryption configuration, and stored 
 
     await db.prepare('UPDATE github_credentials SET encrypted = ? WHERE user_id = ?').bind(marker, stored.user_id).run()
     await assertSyncError(401, 'GITHUB_CREDENTIALS_UNREADABLE', /Reconnect/)
-    assert.deepEqual(warning.mock.calls.map(call => call.arguments), [
+    assert.deepEqual(warning.mock.calls.filter(call => call.arguments[0] === 'GitHub credential diagnostic').map(call => call.arguments), [
       ...['pem_format', 'pem_format', 'pem_format', 'pem_base64', 'rsa_import', 'rsa_import'].map(reason =>
         ['GitHub credential diagnostic', { stage: 'app_jwt', reason }]),
       ...Array.from({ length: 2 }, () =>

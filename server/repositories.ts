@@ -35,12 +35,15 @@ export async function setRepositoryTag(env: Env, current: Session, repoId: numbe
 
 export const snapshotExpired = (lastSync: string | null) => Boolean(lastSync && lastSync <= cutoff())
 
-function installationStatement(env: Env, installation: Installation) {
+const syncLeaseGuard = 'EXISTS (SELECT 1 FROM users WHERE id = ? AND sync_lock = ?)'
+
+function installationStatement(env: Env, installation: Installation, lease?: { userId: number; lock: string }) {
   return env.DB.prepare(`
-    INSERT INTO installations VALUES (?, ?, ?, ?, ?)
+    INSERT INTO installations SELECT ?, ?, ?, ?, ? ${lease ? `WHERE ${syncLeaseGuard}` : ''}
     ON CONFLICT (id) DO UPDATE SET account_id = excluded.account_id, account_name = excluded.account_name,
       account_type = excluded.account_type, repository_selection = excluded.repository_selection
-  `).bind(installation.id, installation.account.id, installation.account.login, installation.account.type, installation.repository_selection)
+  `).bind(installation.id, installation.account.id, installation.account.login, installation.account.type,
+    installation.repository_selection, ...(lease ? [lease.userId, lease.lock] : []))
 }
 
 export async function associateInstallation(env: Env, current: Session, id: number) {
@@ -90,24 +93,90 @@ export async function synchronize(env: Env, current: Session) {
     throw new ApiError(429, 'SYNC_COOLDOWN', 'Wait before synchronizing again.', Math.max(1, (row?.sync_retry_at ?? now + 15) - now))
   }
 
+  const startedAt = Date.now()
+  const runId = crypto.randomUUID()
+  const unique = new Set<number>()
+  const failed: number[] = []
+  let discovered = 0
+  let processed = 0
+  let succeeded = 0
+  let firstFailure: ApiError | undefined
+  let stopReason: ApiError | undefined
+  let stage = 'account_credentials'
+  let outcome = 'failed'
+  const errorKind = (error: unknown) => error instanceof ApiError ? error.code : 'INTERNAL'
+  console.info('Repository sync started', { runId })
+
   try {
-    const deadline = Date.now() + 105_000
+    const deadline = startedAt + 105_000
     const token = await userToken(env, current.id)
+    stage = 'installation_discovery'
     const authorized = await installations(token, deadline)
+    discovered = authorized.length
+    stage = 'installation_sync'
     const timestamp = new Date().toISOString()
-    const guard = 'EXISTS (SELECT 1 FROM users WHERE id = ? AND sync_lock = ?)'
+    // Only a complete user-authorized listing confirms that an omitted installation is revoked.
     const batch: D1PreparedStatement[] = [
-      env.DB.prepare(`DELETE FROM user_installations WHERE user_id = ? AND ${guard}`).bind(current.id, current.id, lock),
+      env.DB.prepare(`DELETE FROM user_installations WHERE user_id = ? AND ${syncLeaseGuard}
+        AND installation_id NOT IN (SELECT value FROM json_each(?))`)
+        .bind(current.id, current.id, lock, JSON.stringify(authorized.map(item => item.id))),
     ]
-    const unique = new Set<number>()
     for (const installation of authorized) {
       const id = installation.id
-      const allowed = await userRepositoryIds(id, token, deadline)
-      const repos = allowed.size
-        ? (await appRepositories(await installationToken(env, id), deadline)).filter(repo => allowed.has(repo.id))
-        : []
-      batch.push(installationStatement(env, installation))
-      batch.push(env.DB.prepare(`INSERT INTO user_installations SELECT ?, ? WHERE ${guard}`).bind(current.id, id, current.id, lock))
+      if (stopReason) {
+        failed.push(id)
+        continue
+      }
+      const installationStarted = Date.now()
+      let operation = 'user_repository_list'
+      let repos: GitHubRepository[]
+      let allowed: Set<number> | undefined
+      processed++
+      try {
+        allowed = await userRepositoryIds(id, token, deadline)
+        repos = []
+        if (allowed.size) {
+          operation = 'installation_token'
+          const appToken = await installationToken(env, id)
+          operation = 'installation_repository_list'
+          const installationRepos = await appRepositories(appToken, deadline)
+          for (const repo of installationRepos) {
+            if (allowed.has(repo.id)) repos.push(repo)
+          }
+        }
+      } catch (error) {
+        let failure = error instanceof ApiError ? error
+          : new ApiError(503, 'GITHUB_UNAVAILABLE', 'GitHub returned an unreadable repository response.')
+        if (operation === 'installation_repository_list' && failure.code === 'GITHUB_REAUTH') {
+          failure = new ApiError(503, 'GITHUB_INSTALLATION_TOKEN', 'GitHub rejected the installation token. Try syncing again.')
+        }
+        if (allowed) {
+          // A completed user repository listing confirms which old grants were removed.
+          batch.push(env.DB.prepare(`DELETE FROM user_repository_access
+            WHERE user_id = ? AND installation_id = ? AND ${syncLeaseGuard}
+              AND repository_id NOT IN (SELECT value FROM json_each(?))`)
+            .bind(current.id, id, current.id, lock, JSON.stringify([...allowed])))
+        }
+        failed.push(id)
+        firstFailure ??= failure
+        if (failure.retryAfter || failure.code === 'SYNC_TIMEOUT') stopReason = failure
+        console.warn('Repository installation sync failed', {
+          runId, installationId: id, operation, code: failure.code, retryAfter: failure.retryAfter,
+          durationMs: Date.now() - installationStarted,
+        })
+        continue
+      }
+
+      succeeded++
+      console.info('Repository installation fetched', {
+        runId, installationId: id, repositories: repos.length, durationMs: Date.now() - installationStarted,
+      })
+      batch.push(
+        env.DB.prepare(`DELETE FROM user_installations WHERE user_id = ? AND installation_id = ? AND ${syncLeaseGuard}`)
+          .bind(current.id, id, current.id, lock),
+        installationStatement(env, installation, { userId: current.id, lock }),
+        env.DB.prepare(`INSERT INTO user_installations SELECT ?, ? WHERE ${syncLeaseGuard}`).bind(current.id, id, current.id, lock),
+      )
       for (let i = 0; i < repos.length; i += 50) {
         const chunk = repos.slice(i, i + 50)
         const ids = JSON.stringify(chunk.map(repo => repo.id))
@@ -116,34 +185,58 @@ export async function synchronize(env: Env, current: Session) {
           env.DB.prepare(`
             INSERT INTO repositories (${repositoryColumns.join(', ')})
             SELECT ${repositoryColumns.map((_, index) => `json_extract(value, '$[${index}]')`).join(', ')}
-            FROM json_each(?) WHERE ${guard}
+            FROM json_each(?) WHERE ${syncLeaseGuard}
             ON CONFLICT (id) DO UPDATE SET ${repositoryColumns.slice(1).map(column => `${column} = excluded.${column}`).join(', ')}
             WHERE excluded.synced_at >= repositories.synced_at
           `).bind(JSON.stringify(chunk.map(repo => repositoryData(repo, timestamp))), current.id, lock),
-          env.DB.prepare(`INSERT OR IGNORE INTO installation_repositories SELECT ?, value FROM json_each(?) WHERE ${guard}`)
+          env.DB.prepare(`INSERT OR IGNORE INTO installation_repositories SELECT ?, value FROM json_each(?) WHERE ${syncLeaseGuard}`)
             .bind(id, ids, current.id, lock),
-          env.DB.prepare(`INSERT INTO user_repository_access SELECT ?, ?, value FROM json_each(?) WHERE ${guard}`)
+          env.DB.prepare(`INSERT INTO user_repository_access SELECT ?, ?, value FROM json_each(?) WHERE ${syncLeaseGuard}`)
             .bind(current.id, id, ids, current.id, lock),
         )
       }
     }
+    stage = 'snapshot_write'
     const completed = new Date().toISOString()
-    batch.push(env.DB.prepare('UPDATE users SET last_sync = ?, sync_retry_at = NULL WHERE id = ? AND sync_lock = ?')
-      .bind(completed, current.id, lock))
-    const result = await env.DB.batch(batch)
-    if (!result.at(-1)?.meta.changes) throw new ApiError(409, 'SYNC_REPLACED', 'The synchronization was replaced. Try again.')
-    return { lastSync: completed, total: unique.size }
+    const retryAfter = stopReason?.retryAfter
+    // The schema has one expiry clock per user. Never renew a retained, unverified grant.
+    batch.push(env.DB.prepare(`
+      UPDATE users SET
+        last_sync = CASE WHEN ? = 0 OR (? > 0 AND NOT EXISTS (
+          SELECT 1 FROM user_repository_access a WHERE a.user_id = users.id
+            AND a.installation_id IN (SELECT value FROM json_each(?))
+        )) THEN ? ELSE last_sync END,
+        sync_retry_at = ?
+      WHERE id = ? AND sync_lock = ?
+      RETURNING last_sync
+    `).bind(failed.length, succeeded, JSON.stringify(failed), completed, retryAfter ? seconds() + retryAfter : null, current.id, lock))
+    const result = await env.DB.batch<{ last_sync: string | null }>(batch)
+    const saved = result.at(-1)?.results[0]
+    if (!saved) throw new ApiError(409, 'SYNC_REPLACED', 'The synchronization was replaced. Try again.')
+    if (!succeeded && firstFailure) throw stopReason ?? firstFailure
+    outcome = failed.length ? 'partial' : 'complete'
+    return {
+      status: outcome, lastSync: saved.last_sync, total: unique.size,
+      installations: { succeeded, failed: failed.length },
+      ...(retryAfter ? { retryAfter } : {}),
+    }
   } catch (error) {
-    if (error instanceof ApiError && error.retryAfter) {
+    if (error instanceof ApiError && stage !== 'snapshot_write' && error.retryAfter) {
       await env.DB.prepare('UPDATE users SET sync_retry_at = ? WHERE id = ? AND sync_lock = ?')
         .bind(seconds() + error.retryAfter, current.id, lock).run()
     }
-    if (error instanceof ApiError && ['GITHUB_ACCESS', 'GITHUB_REAUTH'].includes(error.code)) {
+    if (error instanceof ApiError && error.code === 'GITHUB_REAUTH' &&
+        (stage === 'account_credentials' || stage === 'installation_discovery')) {
       await env.DB.prepare(`DELETE FROM user_installations WHERE user_id = ?
         AND EXISTS (SELECT 1 FROM users WHERE id = ? AND sync_lock = ?)`).bind(current.id, current.id, lock).run()
     }
+    console.warn('Repository sync error', { runId, stage, code: errorKind(error) })
     throw error
   } finally {
+    console.info('Repository sync finished', {
+      runId, outcome, installations: discovered, processed, succeeded, failed: failed.length,
+      repositories: unique.size, durationMs: Date.now() - startedAt,
+    })
     await env.DB.prepare('UPDATE users SET sync_lock = NULL WHERE id = ? AND sync_lock = ?').bind(current.id, lock).run()
   }
 }

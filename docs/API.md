@@ -15,7 +15,7 @@ All endpoints use the dashboard origin. JSON successes use `{ "data": ... }`. JS
 | GET | `/api/overview` | Returns counts, star and fork totals, five recently updated repos, languages, `lastSync`, and `accessExpired`. |
 | GET | `/api/repositories` | Returns `repositories`, `total`, `page`, and `pageSize`. |
 | GET | `/api/repositories/:id` | Returns metadata for the GitHub repository ID when accessible. |
-| POST | `/api/repositories/sync` | Refreshes access and metadata. Returns `lastSync` and `total`. |
+| POST | `/api/repositories/sync` | Refreshes access and metadata. Returns `status` (`complete` or `partial`), `lastSync` (nullable freshness timestamp), `total` (distinct repositories refreshed in this run), installation counts (`succeeded`, `failed`), and `retryAfter` when throttled after partial progress. |
 
 All mutations require an `Origin` matching `APP_BASE_URL`. Tag creation and updates accept JSON. Other mutations accept no request body. Stale access snapshots return empty lists and 404 for details until a successful sync.
 
