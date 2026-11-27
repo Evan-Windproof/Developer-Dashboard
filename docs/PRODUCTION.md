@@ -1,24 +1,24 @@
 # Cloudflare Workers production runbook
 
-Phase 3.1 prepares the Worker and its configuration. Run remote write commands below only in authorized Phase 3.2.
+Cloudflare Workers Builds builds from `main` and deploys the default Wrangler configuration to the existing `developer-dashboard` Worker.
 
-| Setting | Local default | Production environment |
+| Setting | Local development | Production |
 | --- | --- | --- |
-| Worker | `evan-developer-dashboard` via `npm run dev` | `evan-developer-dashboard-prod` via `--env production` |
-| Origin | `http://localhost:8788` | `https://dashboard.evanwindproof.top` |
+| Worker | `npm run dev` with `--config wrangler.local.toml --local` | `developer-dashboard` |
+| Origin | `http://localhost:8788` in `.dev.vars` | `https://dashboard.evanwindproof.top` in `[vars]` |
 | D1 binding | `DB` with existing `.wrangler/state/v3/d1` | `DB` bound to `evan-developer-dashboard-prod` |
-| Secrets | `.dev.vars` | Independent Worker secrets |
+| Secrets | `.dev.vars` | Existing Worker secrets |
 | Assets | Local Vite `dist` | Workers Static Assets from Vite `dist` |
 
-Wrangler sends `/api` and `/api/*` to the Worker before static asset handling. Other paths serve the Vite app with SPA fallback. Production disables `workers.dev` and preview URLs. Local configuration keeps the existing database name, binding, ID and default persistence path.
+Wrangler sends `/api` and `/api/*` to the Worker before static asset handling. Other paths serve the Vite app with SPA fallback. Production disables `workers.dev` and preview URLs.
 
-## Phase 3.2 order of operations
+## Workers Builds
 
-1. Authenticate with `npx wrangler login`. Run `npx wrangler d1 info evan-developer-dashboard-prod --env production` to confirm the Cloudflare account and the existing APAC database. Its ID is `0e6ddcb9-9340-4613-8773-6331ba97844b`.
-2. Confirm that the returned ID matches the `DB` binding under `[[env.production.d1_databases]]` in `wrangler.toml`. Under `[env.production.vars]`, set the GitHub App's `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, and numeric `GITHUB_APP_ID` as strings. Keep `APP_BASE_URL` set to the exact HTTPS origin. `OAUTH_DIAGNOSTICS` is optional and defaults to disabled.
-3. Review the custom domain and GitHub App settings below. Apply the schema with `npx wrangler d1 migrations apply DB --env production --remote`, then confirm the migration list with `npx wrangler d1 migrations list DB --env production --remote`.
-4. Provision the production Worker and configure its secrets using the commands below. Confirm the deployed Worker has all three secrets before attempting sign-in.
-5. Run `npm run build`, then `npx wrangler deploy --env production`. Verify the domain's TLS certificate, load the dashboard, call `/api/health`, and exercise sign-in, installation and sync. Confirm an account with no grant cannot access another user's private repositories. Use the [tag transfer procedure](TAG-TRANSFER.md) if retaining local tags.
+The build command is `npm run build`. The deploy command for the existing Builds project is `npx wrangler deploy`. The top-level Worker name matches the Builds project. The default binding uses production database ID `0e6ddcb9-9340-4613-8773-6331ba97844b`. This configuration release uses the existing D1 schema and data.
+
+Keep `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, and `GITHUB_APP_ID` in the existing Worker's runtime variables. `keep_vars = true` preserves dashboard-defined variables during deployment. The committed HTTPS `APP_BASE_URL` takes precedence for that variable. Local npm commands use `--config wrangler.local.toml --local` and the ignored `.dev.vars` file.
+
+After a successful build, verify HTTPS and assets, call `/api/health`, and exercise sign-in, installation, and sync. Confirm an account without a grant cannot access another user's private repositories.
 
 ## GitHub App setup
 
@@ -28,20 +28,17 @@ GitHub's **Setup URL** is separate from the OAuth callback and an App has one se
 
 ## Secret checklist
 
-Run these interactively from your own authenticated terminal. Keep the GitHub values associated with the selected App and generate a separate 32-byte Base64 encryption key for production. Back up the encryption key securely for future use.
+Verify the existing `developer-dashboard` Worker lists these secret names under **Settings → Variables and Secrets**:
 
-```sh
-npx wrangler secret put GITHUB_CLIENT_SECRET --env production
-npx wrangler secret put GITHUB_PRIVATE_KEY --env production
-npx wrangler secret put SESSION_ENCRYPTION_KEY --env production
-npx wrangler secret list --env production
-```
+- `GITHUB_CLIENT_SECRET`
+- `GITHUB_PRIVATE_KEY`
+- `SESSION_ENCRYPTION_KEY`
 
-The RSA key accepts full PEM text with real or escaped line breaks. Wrangler can offer to create a missing Worker when storing a secret. Accept only in Phase 3.2 and confirm the name shown is `evan-developer-dashboard-prod`. Use `openssl rand -base64 32` locally to generate the production encryption key. Enter it only at the Wrangler prompt.
+From an authenticated terminal, `npx wrangler secret list` also lists names. The configuration fix uses the existing secret bindings. The RSA secret accepts a full PEM with real or escaped line breaks. The encryption key is Base64 for 32 bytes.
 
 ## Custom domain
 
-In the Cloudflare account that owns the active `evanwindproof.top` zone, review **DNS → Records**, **Workers Routes**, and existing Workers' **Domains & Routes** for the exact hostname and any overlapping route. Check for an existing Pages custom domain on the hostname as well. Resolve any conflict with the service owner before deployment. The configured Worker Custom Domain lets Cloudflare provision the required DNS record and TLS. Verify attachment and certificate readiness under the production Worker's **Domains & Routes**.
+In the Cloudflare account that owns the active `evanwindproof.top` zone, review **DNS → Records**, **Workers Routes**, and existing Workers' **Domains & Routes** for the exact hostname and any overlapping route. Check for an existing Pages custom domain on the hostname as well. Resolve any conflict with the service owner before deployment. The configured Worker Custom Domain lets Cloudflare provision the required DNS record and TLS. Verify attachment and certificate readiness under the `developer-dashboard` Worker's **Domains & Routes**.
 
 Cloudflare authentication was unavailable during preparation. The local resolver returned no address and the external DNS-over-HTTPS query was blocked, so the DNS record and Cloudflare route inventory still require an authenticated preflight.
 

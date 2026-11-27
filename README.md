@@ -60,7 +60,7 @@ Use `.dev.vars` for local values. `GITHUB_PRIVATE_KEY` accepts an unencrypted RS
 
 ## Cloudflare Workers production
 
-The `production` environment targets `https://dashboard.evanwindproof.top` and uses a separate D1 database and Worker secrets. The default local environment uses `http://localhost:8788`, the existing local D1 persistence, and `.dev.vars`.
+Cloudflare Workers Builds deploys the default Wrangler configuration to the existing `developer-dashboard` Worker at `https://dashboard.evanwindproof.top`. The local npm commands use `wrangler.local.toml`, which uses the existing local D1 persistence. Set `APP_BASE_URL=http://localhost:8788` in the ignored `.dev.vars` file.
 
 Phase 3.1 prepares the configuration. See the [production runbook](docs/PRODUCTION.md) for required values, domain and GitHub App setup, the migration audit, and the steps for an authorized Phase 3.2 deployment. See the [tag transfer procedure](docs/TAG-TRANSFER.md) to carry over personal tags without transferring sessions or credentials.
 

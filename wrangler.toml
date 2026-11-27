@@ -1,6 +1,10 @@
-name = "evan-developer-dashboard"
+name = "developer-dashboard"
 main = "server/worker.ts"
 compatibility_date = "2026-11-01"
+keep_vars = true
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "dashboard.evanwindproof.top", custom_domain = true }]
 
 [assets]
 directory = "./dist"
@@ -9,30 +13,9 @@ run_worker_first = ["/api", "/api/*"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "evan-developer-dashboard"
-database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "migrations"
-
-[vars]
-APP_BASE_URL = "http://localhost:8788"
-
-[env.production]
-name = "evan-developer-dashboard-prod"
-workers_dev = false
-preview_urls = false
-routes = [{ pattern = "dashboard.evanwindproof.top", custom_domain = true }]
-
-[env.production.assets]
-directory = "./dist"
-not_found_handling = "single-page-application"
-run_worker_first = ["/api", "/api/*"]
-
-[[env.production.d1_databases]]
-binding = "DB"
 database_name = "evan-developer-dashboard-prod"
 database_id = "0e6ddcb9-9340-4613-8773-6331ba97844b"
 migrations_dir = "migrations"
 
-[env.production.vars]
+[vars]
 APP_BASE_URL = "https://dashboard.evanwindproof.top"
-# Set GITHUB_APP_SLUG, GITHUB_CLIENT_ID, and GITHUB_APP_ID before deployment.

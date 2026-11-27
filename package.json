@@ -6,10 +6,10 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "dev": "npm run build && wrangler dev --local --port 8788",
+    "dev": "npm run build && wrangler dev --config wrangler.local.toml --local --port 8788",
     "build": "tsc --noEmit && vite build",
     "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test tests/*.test.ts",
-    "db:local": "wrangler d1 migrations apply DB --local"
+    "db:local": "wrangler d1 migrations apply DB --config wrangler.local.toml --local"
   },
   "dependencies": {
     "lucide-react": "^0.577.0",
