@@ -16,3 +16,14 @@ Create a development GitHub App for `http://localhost:8788` and a separate produ
 Changing the dashboard origin requires updating both GitHub URLs and `APP_BASE_URL`. Use the configured origin when testing, since session and state cookies belong to that host.
 
 [GitHub's App registration documentation](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+
+## Diagnose a local login failure
+
+For `/?login-error=GITHUB_UNAVAILABLE`, add `OAUTH_DIAGNOSTICS=1` to the local `.dev.vars`, restart Wrangler, and start a new sign-in. Read the `GitHub OAuth diagnostic` entries in the Wrangler terminal.
+
+- `oauth_token_exchange` refers to `github.com/login/oauth/access_token`.
+- `github_user_lookup` refers to `api.github.com/user`.
+- A null status means fetch threw before returning an HTTP response. A network code appears when the runtime supplies a recognized code or reports a recognizable timeout or DNS failure.
+- An HTTP status means the runtime received a response. The logger includes recognized GitHub messages and OAuth error identifiers when available.
+
+Run this check through Wrangler. Node.js accepts `redirect: 'error'`, which the Workers runtime rejects before contacting GitHub. The dashboard uses `redirect: 'manual'` and treats upstream redirects as errors. Remove `OAUTH_DIAGNOSTICS` after verification.

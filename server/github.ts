@@ -38,12 +38,68 @@ type OAuthResponse = {
   error?: string
 }
 
-async function call(url: string, init: RequestInit, oauthCall = false) {
+type OAuthStage = 'oauth_token_exchange' | 'github_user_lookup'
+const errorClasses = ['Error', 'TypeError', 'AbortError', 'TimeoutError', 'NetworkError', 'NotSupportedError']
+const networkCodes = [
+  'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH',
+  'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_HANDSHAKE_TIMEOUT',
+]
+const githubMessages = [
+  'Not Found', 'Bad credentials', 'Server Error', 'Service Unavailable', 'Internal Server Error',
+  'API rate limit exceeded', 'You have exceeded a secondary rate limit.',
+]
+const oauthErrors = [
+  'incorrect_client_credentials', 'redirect_uri_mismatch', 'bad_verification_code',
+  'unverified_user_email', 'bad_code_verifier', 'expired_token',
+]
+
+function allowlisted(value: unknown, entries: string[]) {
+  return entries.find(entry => entry === value)
+}
+
+function safeNetworkCode(error: unknown) {
+  if (!(error instanceof Error)) return null
+  const cause = error.cause as { code?: unknown } | undefined
+  const direct = error as Error & { code?: unknown }
+  const code = allowlisted(cause?.code, networkCodes) ?? allowlisted(direct.code, networkCodes)
+  if (code) return code
+  if (error.name === 'TimeoutError') return 'ETIMEDOUT'
+  // workerd can report DNS failures in the message without providing a structured code.
+  if (error.message.startsWith('Network connection failed: failed to lookup address information:')) {
+    return error.message.endsWith('Temporary failure in name resolution') ? 'EAI_AGAIN' : 'DNS_LOOKUP_FAILED'
+  }
+  return null
+}
+
+function logOAuth(stage: OAuthStage, url: string, details: object) {
+  const { hostname, pathname } = new URL(url)
+  console.info('GitHub OAuth diagnostic', { stage, hostname, path: pathname, ...details })
+}
+
+async function call(url: string, init: RequestInit, oauthCall = false, stage?: OAuthStage) {
   let response: Response
   try {
-    response = await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(12_000) })
-  } catch {
+    // Workers support manual redirects. Keep credentials on the original host.
+    response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(12_000) })
+  } catch (error) {
+    if (stage) {
+      logOAuth(stage, url, {
+        status: null,
+        errorClass: error instanceof Error ? allowlisted(error.name, errorClasses) ?? 'Error' : 'Unknown',
+        networkCode: safeNetworkCode(error),
+      })
+    }
     throw new ApiError(503, 'GITHUB_UNAVAILABLE', 'GitHub is temporarily unavailable. Try again shortly.')
+  }
+  if (stage) {
+    const upstream = response.ok ? null : await response.clone()
+      .json<{ message?: unknown; error?: unknown }>().catch(() => null)
+    logOAuth(stage, url, {
+      status: response.status,
+      githubMessage: allowlisted(upstream?.message, githubMessages) ?? allowlisted(upstream?.error, oauthErrors) ?? null,
+    })
   }
   const retry = response.headers.get('retry-after')
   if (response.status === 429 || (response.status === 403 && (retry || response.headers.get('x-ratelimit-remaining') === '0'))) {
@@ -68,14 +124,22 @@ async function call(url: string, init: RequestInit, oauthCall = false) {
   return response
 }
 
-export async function exchange(env: Env, payload: Record<string, string>): Promise<Token> {
+export async function exchange(env: Env, payload: Record<string, string>, diagnostics = false): Promise<Token> {
   const response = await call(`${oauth}/access_token`, {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, ...payload }),
-  }, true)
+  }, true, diagnostics ? 'oauth_token_exchange' : undefined)
   const data = await response.json<OAuthResponse>()
-  if (!data.access_token || data.error) throw new ApiError(401, 'GITHUB_REAUTH', 'GitHub authorization expired or was declined. Sign in again.')
+  if (!data.access_token || data.error) {
+    if (diagnostics && response.ok) {
+      logOAuth('oauth_token_exchange', `${oauth}/access_token`, {
+        status: response.status,
+        githubMessage: allowlisted(data.error, oauthErrors) ?? null,
+      })
+    }
+    throw new ApiError(401, 'GITHUB_REAUTH', 'GitHub authorization expired or was declined. Sign in again.')
+  }
   return {
     access: data.access_token,
     expires: data.expires_in ? seconds() + data.expires_in : null,
@@ -84,7 +148,7 @@ export async function exchange(env: Env, payload: Record<string, string>): Promi
   }
 }
 
-async function github(path: string, token: string, payload?: object) {
+async function github(path: string, token: string, payload?: object, stage?: OAuthStage) {
   return call(`${api}${path}`, {
     method: payload ? 'POST' : 'GET',
     body: payload ? JSON.stringify(payload) : undefined,
@@ -95,10 +159,11 @@ async function github(path: string, token: string, payload?: object) {
       'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'Evan-Developer-Dashboard',
     },
-  })
+  }, false, stage)
 }
 
-export const githubUser = async (token: string) => (await github('/user', token)).json<GitHubUser>()
+export const githubUser = async (token: string, diagnostics = false) =>
+  (await github('/user', token, undefined, diagnostics ? 'github_user_lookup' : undefined)).json<GitHubUser>()
 
 async function paginate<T>(path: string, token: string, field: 'installations' | 'repositories', deadline: number) {
   const results: T[] = []

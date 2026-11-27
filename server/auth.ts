@@ -71,8 +71,9 @@ export async function loginCallback(request: Request, env: Env, url: URL) {
   if (url.searchParams.has('error') || !code || code.length > 1024) {
     throw new ApiError(400, 'LOGIN_DECLINED', 'GitHub authorization was declined or did not return a code.')
   }
-  const token = await exchange(env, { code, redirect_uri: callbackUrl(env), code_verifier: verifier })
-  const user = await githubUser(token.access)
+  const diagnostics = env.OAUTH_DIAGNOSTICS === '1'
+  const token = await exchange(env, { code, redirect_uri: callbackUrl(env), code_verifier: verifier }, diagnostics)
+  const user = await githubUser(token.access, diagnostics)
   const row = await env.DB.prepare(`
     INSERT INTO users (github_id, login, avatar_url, display_name) VALUES (?, ?, ?, ?)
     ON CONFLICT (github_id) DO UPDATE SET login = excluded.login, avatar_url = excluded.avatar_url,

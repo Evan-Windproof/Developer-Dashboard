@@ -325,3 +325,97 @@ test('logout removes the session and expired sessions fail server validation', a
   await db.prepare('UPDATE sessions SET expires_at = ?').bind(seconds() - 1).run()
   assert.equal((await get('/api/me', authCookieB)).status, 401)
 })
+
+test('OAuth diagnostics distinguish token transport failures from GitHub user HTTP errors', async t => {
+  const info = t.mock.method(console, 'info', () => {})
+  const previousFetch = globalThis.fetch
+  const tokenPath = '/login/oauth/access_token'
+  let failTokenExchange = true
+  let userRequests = 0
+
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'github.com' && url.pathname === tokenPath && failTokenExchange) {
+      const cause = Object.assign(new Error(env.GITHUB_CLIENT_SECRET), { code: 'ENOTFOUND' })
+      throw new TypeError(String(init?.body), { cause })
+    }
+    if (url.hostname === 'api.github.com' && url.pathname === '/user') {
+      userRequests++
+      return fakeResponse({ message: 'Service Unavailable', access_token: accessA }, 503)
+    }
+    return previousFetch(input, init)
+  })
+
+  const assertUnavailable = async () => {
+    const response = await loginReturn(await loginStart())
+    assert.equal(response.status, 302)
+    assert.equal(response.headers.get('Location'), '/?login-error=GITHUB_UNAVAILABLE')
+  }
+
+  await assertUnavailable()
+  assert.equal(info.mock.callCount(), 0)
+  env.OAUTH_DIAGNOSTICS = '1'
+  try {
+    await assertUnavailable()
+    assert.equal(userRequests, 0)
+    assert.deepEqual(info.mock.calls[0].arguments, ['GitHub OAuth diagnostic', {
+      stage: 'oauth_token_exchange', hostname: 'github.com', path: tokenPath,
+      status: null, errorClass: 'TypeError', networkCode: 'ENOTFOUND',
+    }])
+
+    failTokenExchange = false
+    await assertUnavailable()
+    assert.equal(userRequests, 1)
+    assert.deepEqual(info.mock.calls.slice(1).map(call => call.arguments[1]), [
+      {
+        stage: 'oauth_token_exchange', hostname: 'github.com', path: tokenPath,
+        status: 200, githubMessage: null,
+      },
+      {
+        stage: 'github_user_lookup', hostname: 'api.github.com', path: '/user',
+        status: 503, githubMessage: 'Service Unavailable',
+      },
+    ])
+  } finally {
+    delete env.OAUTH_DIAGNOSTICS
+  }
+})
+
+test('OAuth diagnostics suppress arbitrary upstream messages and preserve existing error handling', async t => {
+  const info = t.mock.method(console, 'info', () => {})
+  const previousFetch = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (new URL(String(input)).hostname === 'github.com') {
+      return fakeResponse({ message: String(init?.body), error: 'bad_verification_code' }, 400)
+    }
+    return previousFetch(input, init)
+  })
+  env.OAUTH_DIAGNOSTICS = '1'
+  try {
+    const response = await loginReturn(await loginStart())
+    assert.equal(response.headers.get('Location'), '/?login-error=GITHUB_REAUTH')
+    assert.deepEqual(info.mock.calls.map(call => call.arguments[1]), [{
+      stage: 'oauth_token_exchange', hostname: 'github.com', path: '/login/oauth/access_token',
+      status: 400, githubMessage: 'bad_verification_code',
+    }])
+  } finally {
+    delete env.OAUTH_DIAGNOSTICS
+  }
+})
+
+test('GitHub redirects are rejected without forwarding the OAuth request', async t => {
+  const previousFetch = globalThis.fetch
+  const requests: string[] = []
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'github.com' || url.hostname === 'api.github.com' || url.hostname === 'redirect.example') {
+      requests.push(url.origin + url.pathname)
+      assert.equal(init?.redirect, 'manual')
+      return new Response(null, { status: 307, headers: { Location: 'https://redirect.example/token' } })
+    }
+    return previousFetch(input, init)
+  })
+  const response = await loginReturn(await loginStart())
+  assert.equal(response.headers.get('Location'), '/?login-error=GITHUB_UNAVAILABLE')
+  assert.deepEqual(requests, ['https://github.com/login/oauth/access_token'])
+})
