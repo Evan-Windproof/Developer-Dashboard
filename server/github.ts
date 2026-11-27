@@ -165,13 +165,17 @@ async function github(path: string, token: string, payload?: object, stage?: OAu
 export const githubUser = async (token: string, diagnostics = false) =>
   (await github('/user', token, undefined, diagnostics ? 'github_user_lookup' : undefined)).json<GitHubUser>()
 
-async function paginate<T>(path: string, token: string, field: 'installations' | 'repositories', deadline: number) {
+async function paginate<T extends { id: number }>(path: string, token: string, field: 'installations' | 'repositories', deadline: number) {
   const results: T[] = []
   for (let page = 1; ; page++) {
     if (Date.now() >= deadline) throw new ApiError(503, 'SYNC_TIMEOUT', 'GitHub took too long to respond. Try syncing again.')
     const response = await github(`${path}?per_page=100&page=${page}`, token)
-    const data = await response.json<Record<typeof field, T[]>>()
-    results.push(...data[field])
+    const data = await response.json<Record<typeof field, T[]>>().catch(() => null)
+    const entries = data?.[field]
+    if (!Array.isArray(entries) || entries.some(item => !Number.isSafeInteger(item?.id) || item.id < 1)) {
+      throw new ApiError(503, 'GITHUB_UNAVAILABLE', 'GitHub returned an invalid listing. Try again shortly.')
+    }
+    results.push(...entries)
     if (!/rel="next"/.test(response.headers.get('Link') ?? '')) return results
   }
 }

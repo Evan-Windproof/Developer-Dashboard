@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Archive, ArrowDownRight, ArrowRight, Box, ChartNoAxesCombined, ChevronLeft, ChevronRight,
@@ -6,6 +6,7 @@ import {
   LockKeyhole, LogOut, Menu, Moon, Play, RefreshCw, Search, Settings, Star, Sun, Tag as TagIcon, X,
 } from 'lucide-react'
 import { api, RequestError, type Account, type Overview, type Repository, type RepositoryPage, type Tag } from './api'
+import { refreshDashboard, refreshLabels, refreshTargets, syncAndRefresh, updateRepositoryAccess, type RefreshTarget, type SyncResult } from './dashboard-sync'
 import './style.css'
 
 const navigation = [
@@ -293,12 +294,15 @@ function App() {
   const [theme, setTheme] = useState(themePreference)
   const systemDark = useSyncExternalStore(subscribeSystemTheme, isSystemDark)
   const [menu, setMenu] = useState(false)
-  const [snapshot, setSnapshot] = useState<Overview>()
+  const [{ snapshot, lastSync }, dispatchAccess] = useReducer(updateRepositoryAccess, {})
   const [installations, setInstallations] = useState<number>()
   const [version, setVersion] = useState(0)
   const [detail, setDetail] = useState<Repository>()
   const [busy, setBusy] = useState('')
   const [failure, setFailure] = useState<RequestError>()
+  const [syncResult, setSyncResult] = useState<SyncResult>()
+  const [refreshFailures, setRefreshFailures] = useState<Partial<Record<RefreshTarget, string>>>({})
+  const refreshGeneration = useRef({ overview: 0, installations: 0, tags: 0 })
   const [cooldown, setCooldown] = useState(0)
   const [clock, setClock] = useState(Date.now)
   const [callback] = useState(() => new URLSearchParams(location.search))
@@ -339,25 +343,53 @@ function App() {
     if (location.search) history.replaceState(null, '', location.pathname + location.hash)
     return () => window.removeEventListener('hashchange', navigate)
   }, [])
-  const reload = useCallback(async () => {
-    const [data, links, nextTags] = await Promise.all([
-      api<Overview>('/api/overview'), api<unknown[]>('/api/github/installations'), api<Tag[]>('/api/tags'),
-    ])
-    setTags(nextTags)
-    setSnapshot(data)
-    setInstallations(links.length)
-    setVersion(value => value + 1)
-    if (data.accessExpired) setDetail(undefined)
+  const reload = useCallback(async (targets: RefreshTarget[] = refreshTargets) => {
+    const generation = { ...refreshGeneration.current }
+    for (const target of targets) generation[target] = ++refreshGeneration.current[target]
+    const current = (target: RefreshTarget) => generation[target] === refreshGeneration.current[target]
+    await refreshDashboard(targets, {
+      overview: async () => {
+        const data = await api<Overview>('/api/overview')
+        if (!current('overview')) return
+        dispatchAccess({ type: 'overview', snapshot: data })
+        if (data.accessExpired) setDetail(undefined)
+      },
+      installations: async () => {
+        const links = await api<unknown[]>('/api/github/installations')
+        if (current('installations')) setInstallations(links.length)
+      },
+      tags: async () => {
+        const nextTags = await api<Tag[]>('/api/tags')
+        if (current('tags')) setTags(nextTags)
+      },
+    }, (target, result) => {
+      if (!current(target)) return
+      if (result.status === 'rejected' && result.reason instanceof RequestError && result.reason.code === 'UNAUTHENTICATED') {
+        setAccount(null)
+      }
+      setRefreshFailures(previous => ({
+        ...previous, [target]: result.status === 'rejected' ? errorMessage(result.reason) : undefined,
+      }))
+    })
   }, [])
+  const refreshWorkspace = useCallback(async () => {
+    setVersion(value => value + 1)
+    await reload()
+  }, [reload])
   useEffect(() => {
-    if (account) void reload().catch(report)
-    else { setSnapshot(undefined); setInstallations(undefined); setDetail(undefined); setTags([]); setManagingTags(false) }
-  }, [account, reload, report])
+    if (account) void refreshWorkspace()
+    else {
+      for (const target of refreshTargets) refreshGeneration.current[target]++
+      dispatchAccess({ type: 'reset' }); setInstallations(undefined); setDetail(undefined); setTags([]); setManagingTags(false)
+      setRefreshFailures({}); setSyncResult(undefined)
+    }
+  }, [account, refreshWorkspace])
   useEffect(() => {
     if (!snapshot?.lastSync || snapshot.accessExpired) return
-    const remaining = new Date(snapshot.lastSync).getTime() + 15 * 60_000 - Date.now()
+    const snapshotTime = snapshot.lastSync
+    const remaining = new Date(snapshotTime).getTime() + 15 * 60_000 - Date.now()
     const timeout = setTimeout(() => {
-      setSnapshot(previous => previous ? { ...previous, accessExpired: true, recent: [] } : previous)
+      dispatchAccess({ type: 'expire', lastSync: snapshotTime })
       setDetail(undefined)
     }, Math.max(0, remaining))
     return () => clearTimeout(timeout)
@@ -372,11 +404,19 @@ function App() {
     return () => clearInterval(timer)
   }, [cooldown])
 
+  async function refreshAfterSync() {
+    // Prior rows can include repositories revoked by this sync.
+    dispatchAccess({ type: 'invalidate' })
+    setDetail(undefined)
+    await refreshWorkspace()
+  }
+
   async function action(kind: 'sync' | 'install' | 'logout') {
     setBusy(kind)
     setFailure(undefined)
     setCallbackError('')
     setMessage('')
+    if (kind === 'sync') setSyncResult(undefined)
     try {
       if (kind === 'install') {
         const { url } = await api<{ url: string }>('/api/github/installations/install-url')
@@ -385,13 +425,15 @@ function App() {
         await api('/api/auth/logout', { method: 'POST' })
         setAccount(null)
       } else {
-        const result = await api<{ total: number }>('/api/repositories/sync', { method: 'POST' })
-        await reload()
-        setMessage(`Synchronized ${number.format(result.total)} ${result.total === 1 ? 'repository' : 'repositories'}.`)
+        await syncAndRefresh(result => {
+          setSyncResult(result)
+          dispatchAccess({ type: 'sync', lastSync: result.lastSync })
+          if (result.retryAfter) setCooldown(Date.now() + result.retryAfter * 1000)
+        }, refreshAfterSync)
       }
     } catch (error) {
       report(error)
-      if (kind === 'sync') await reload().catch(() => undefined)
+      if (kind === 'sync') await refreshAfterSync()
     } finally {
       setBusy('')
     }
@@ -424,11 +466,14 @@ function App() {
     <Github size={17} /> {busy === 'install' ? 'Opening GitHub…' : 'Install GitHub App'}
   </button>
   const data = snapshot?.accessExpired ? undefined : snapshot
+  const syncMessage = syncResult && (syncResult.status === 'complete'
+    ? `Synchronized ${number.format(syncResult.total)} ${syncResult.total === 1 ? 'repository' : 'repositories'}.`
+    : `Sync partially completed. Updated ${number.format(syncResult.total)} repositories across ${syncResult.installations.succeeded} installations. ${syncResult.installations.failed} installations could not be refreshed.`)
   const empty = snapshot?.accessExpired
     ? <Empty title="Repository access needs to be refreshed" description="Sync repositories to verify your current GitHub access." action={syncButton} />
     : !snapshot || installations === undefined
-      ? failure ? <Empty title="Repository data is unavailable" description="Try loading your dashboard again."
-        action={<button className="button" onClick={() => { setFailure(undefined); void reload().catch(report) }}>Try again</button>} />
+      ? (refreshFailures.overview || refreshFailures.installations) ? <Empty title="Repository data is unavailable"
+        description="Retry the failed dashboard refresh to load this view." />
         : <div className="panel-body" role="status">Loading your workspace…</div>
       : !installations ? <Empty title="Connect a GitHub installation" description="Install the GitHub App on your personal account or an organization. If it is already installed, sync to discover it." action={installButton} />
       : !snapshot.lastSync ? <Empty title="Sync your repositories" description="Your installation is connected. Run your first sync to load repository metadata." action={syncButton} />
@@ -466,8 +511,16 @@ function App() {
           <div className="actions">{page === 'repositories' && <button className="button" onClick={() => setManagingTags(true)}>Manage tags</button>}{installButton}{syncButton}</div>
         </div>
         <div className="sync-info"><span className={`status-dot ${data?.lastSync ? 'synced' : ''}`} />
-          <span>{snapshot?.lastSync ? `Last successful sync · ${date(snapshot.lastSync)}` : 'No successful sync yet'}</span></div>
+          <span>{lastSync ? `Repository access last refreshed · ${date(lastSync)}` : lastSync === null
+            ? 'Repository access has never been refreshed' : 'Repository access history is unavailable'}</span></div>
         {message && <Notice kind="info">{message}</Notice>}
+        {syncMessage && <Notice kind="info">{syncMessage}</Notice>}
+        {refreshTargets.map(target => refreshFailures[target] && <Notice key={target}>
+          {refreshLabels[target]} refresh failed. {refreshFailures[target]}{' '}
+          <button className="text-button" disabled={Boolean(busy)} onClick={() => void reload([target])}>
+            Retry {refreshLabels[target].toLowerCase()}
+          </button>
+        </Notice>)}
         {callbackError && <Notice>{callbackError}</Notice>}
         {failure && <Notice>{failure.message} {['GITHUB_REAUTH', 'GITHUB_CREDENTIALS_UNREADABLE'].includes(failure.code) && <a href={loginUrl}>Reconnect GitHub</a>}</Notice>}
         {page === 'overview' ? <>
@@ -486,9 +539,9 @@ function App() {
     </div>
     {detail && <Details repo={detail} tags={tags} close={() => setDetail(undefined)} update={repository => {
       setDetail(previous => previous?.id === repository.id ? repository : previous)
-      void reload().catch(report)
+      void refreshWorkspace()
     }} />}
-    {managingTags && <TagManager tags={tags} close={() => setManagingTags(false)} refresh={reload} />}
+    {managingTags && <TagManager tags={tags} close={() => setManagingTags(false)} refresh={refreshWorkspace} />}
   </div>
 }
 

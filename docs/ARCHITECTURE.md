@@ -28,12 +28,12 @@ Foreign keys ensure per-user grants refer to both a user-installation associatio
 1. Acquire a database-backed lease for the user. Concurrent attempts receive an error and recent attempts have a short cooldown.
 2. Refresh the user access token if needed. Page through the installations visible to that user.
 3. For each installation, page through the user's visible repository IDs. If the list has entries, mint a Metadata-only installation token and page through the installation's repository metadata. Keep the intersection.
-4. In one D1 batch, replace the user's links, upsert metadata, and record the successful sync time. Guard writes with the lease ID. A failed batch leaves the previous snapshot intact. A definitive GitHub access denial clears the user's access links.
-5. Return the repository count. The client shows an in-progress state during the request and reloads the overview and repository list when sync finishes.
+4. Commit changes in one D1 batch. Replace grants for successful installations and remove installations omitted by a complete discovery response. A completed user repository listing can confirm narrower revocations even if a later installation request fails. Keep remaining grants for failed installations at their prior expiry. Account-wide credential failures can clear all access grants. Guard snapshot writes with the lease ID.
+5. Report complete or partial results independently from the client's follow-up refreshes. The UI can retry a failed Overview, GitHub installations, or Tags read separately. Server logs record a run ID, installation outcomes, counts, durations, and sanitized error codes.
 
-Cached grants expire after 15 minutes to bound stale visibility. A successful sync revalidates the grant list. Temporary network errors can leave the previous snapshot accessible through the rest of its lifetime.
+Cached grants expire after 15 minutes. D1 has one freshness timestamp per user. If a partial run retains unverified grants, the old expiry still applies to that user's snapshot, including healthy installations. A partial run can advance the timestamp when no unverified grants are retained. Tags and repository metadata remain stored when access is removed or expires.
 
-The sync runs in one request with a deadline. Accounts spanning many installations or pages may reach Cloudflare invocation, D1 query, or GitHub limits. App installations that return a confirmed access denial can cause a sync to fail until access is corrected. Phase 1 keeps synchronization user-initiated. Queue-based sync and revocation events are candidates for later work.
+Sync still runs in one request. Large installations can reach Cloudflare or GitHub limits. Rate limits stop further upstream requests during that run and set a retry delay.
 
 ## Personal tags
 

@@ -51,8 +51,13 @@ export interface RepositoryPage {
 }
 
 export class RequestError extends Error {
-  constructor(public code: string, message: string, public retryAfter?: number) {
+  readonly code: string
+  readonly retryAfter?: number
+
+  constructor(code: string, message: string, retryAfter?: number) {
     super(message)
+    this.code = code
+    this.retryAfter = retryAfter
   }
 }
 
