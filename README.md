@@ -1,9 +1,10 @@
 # Evan Developer Dashboard
 
-Evan Developer Dashboard is an open-source workspace for browsing GitHub repositories across personal and organization installations. Each developer signs in with their own GitHub account and sees the repositories they can access through the dashboard's GitHub App.
+Evan Developer Dashboard is an open-source workspace for browsing GitHub repositories across personal and organization installations. The [public demo](https://dashboard.evanwindproof.top/demo) lets anyone explore Evan Windproof’s public repositories without signing in. The personal workspace remains protected by GitHub sign-in.
 
 ## Features
 
+- Public, read-only demo of Evan Windproof’s public repository metadata, with no sign-in required.
 - GitHub sign-in and installation verification for personal accounts and organizations.
 - Manual repository synchronization with pagination, progress feedback, rate-limit handling, and the last successful sync time.
 - Overview with repository counts, stars, forks, and recently updated repositories.
