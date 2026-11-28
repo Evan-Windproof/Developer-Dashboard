@@ -123,11 +123,11 @@ function TagManager({ tags, close, refresh }: { tags: Tag[]; close: () => void; 
   </dialog>
 }
 
-function RepoTable({ repositories, onDetails }: { repositories: Repository[]; onDetails: (repo: Repository) => void }) {
+function RepoTable({ repositories, onDetails }: { repositories: Repository[]; onDetails?: (repo: Repository) => void }) {
   return <div className="table-wrap" tabIndex={0} role="region" aria-label="Repository table">
     <table><thead><tr>
       <th scope="col">Repository</th><th scope="col">Visibility</th><th scope="col">Language</th>
-      <th scope="col">Stars</th><th scope="col">Forks</th><th scope="col">Updated</th><th scope="col"><span className="sr-only">Details</span></th>
+      <th scope="col">Stars</th><th scope="col">Forks</th><th scope="col">Updated</th>{onDetails && <th scope="col"><span className="sr-only">Details</span></th>}
     </tr></thead><tbody>{repositories.map(repo => <tr key={repo.id}>
       <td><div className="repo-title"><Box size={16} /><GitHubLink repo={repo}>{repo.name}</GitHubLink></div>
         <div className="repo-description">{repo.owner}{repo.description ? ` · ${repo.description}` : ''}</div>
@@ -135,7 +135,7 @@ function RepoTable({ repositories, onDetails }: { repositories: Repository[]; on
       <td><span className={`visibility ${repo.visibility}`}>{repo.visibility}</span></td>
       <td>{repo.language ? <span className="language"><span aria-hidden="true" />{repo.language}</span> : '—'}</td>
       <td>{number.format(repo.stars)}</td><td>{number.format(repo.forks)}</td><td className="nowrap">{shortDate(repo.updated_at)}</td>
-      <td><button className="icon-button" aria-label={`Details for ${repo.full_name}`} onClick={() => onDetails(repo)}><ChevronRight size={18} /></button></td>
+      {onDetails && <td><button className="icon-button" aria-label={`Details for ${repo.full_name}`} onClick={() => onDetails(repo)}><ChevronRight size={18} /></button></td>}
     </tr>)}</tbody></table>
   </div>
 }
@@ -286,7 +286,28 @@ function RepositoryList({ snapshot, version, tags, empty, onDetails, onError }: 
   </section>
 }
 
+function PublicDemo({ themeToggle }: { themeToggle: ReactNode }) {
+  const [repos,setRepos]=useState<Repository[]>()
+  const [error,setError]=useState('')
+  const [query,setQuery]=useState('')
+  const [sort,setSort]=useState('updated')
+  useEffect(()=>{let active=true;api<{repositories:Repository[]}>('/api/public/repositories').then(data=>{if(active)setRepos(data.repositories)}).catch(e=>{if(active)setError(errorMessage(e))});return()=>{active=false}},[])
+  const filtered=(repos??[]).filter(r=>(r.full_name+' '+(r.description??'')).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>sort==='name'?a.full_name.localeCompare(b.full_name):sort==='stars'?b.stars-a.stars:new Date(b.updated_at??0).getTime()-new Date(a.updated_at??0).getTime())
+  const stats=[['Public repositories',repos?.length??0],['Stars',(repos??[]).reduce((n,r)=>n+r.stars,0)],['Forks',(repos??[]).reduce((n,r)=>n+r.forks,0)]]
+  return <div className="signin"><header><Brand/>{themeToggle}</header><main className="content public-demo">
+    <div className="page-heading"><div><h1>Evan Developer Dashboard · Public Demo</h1><p>Explore Evan Windproof’s public GitHub projects. No sign-in required.</p></div><a className="button primary" href="/">Sign in to personal dashboard <ArrowRight size={16}/></a></div>
+    <div className="sync-info"><span className="status-dot synced"/>PUBLIC · READ ONLY</div>
+    <Notice kind="info">This demo displays public repository metadata only. Private repositories, personal tags and account controls are not available.</Notice>
+    {error&&<Notice>{error}</Notice>}
+    {!repos&&!error&&<section className="panel panel-body">Loading public repositories…</section>}
+    {repos&&<><div className="metrics">{stats.map(([label,value])=><div className="metric" key={label}><strong>{number.format(Number(value))}</strong><span>{label}</span></div>)}</div>
+      <section className="panel"><div className="filters"><label className="search"><Search size={17}/><input aria-label="Search public repositories" placeholder="Search repositories…" value={query} onChange={e=>setQuery(e.target.value)}/></label><label><span className="sr-only">Sort by</span><select value={sort} onChange={e=>setSort(e.target.value)}><option value="updated">Recently updated</option><option value="name">Name</option><option value="stars">Most stars</option></select></label></div>
+      <RepoTable repositories={filtered}/></section></>}
+    <footer className="content-footer"><LockKeyhole size={15}/> Public read-only preview · <a href="/">Open personal dashboard</a></footer>
+  </main></div>
+}
 function App() {
+  const demoMode=location.pathname==='/demo'
   const [account, setAccount] = useState<Account | null>()
   const [tags, setTags] = useState<Tag[]>([])
   const [managingTags, setManagingTags] = useState(false)
@@ -332,7 +353,7 @@ function App() {
     }
   }, [report])
 
-  useEffect(() => { void loadAccount() }, [loadAccount])
+  useEffect(() => { if(!demoMode) void loadAccount() }, [demoMode,loadAccount])
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('dashboard-theme', theme)
@@ -443,6 +464,8 @@ function App() {
   const toggleTheme = <button className="icon-button theme-toggle" aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
     title={dark ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(dark ? 'light' : 'dark')}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>
 
+  if(demoMode) return <PublicDemo themeToggle={toggleTheme}/>
+
   if (!account) return <main className="signin">
     <header><Brand />{toggleTheme}</header>
     <section className="signin-card">
@@ -453,6 +476,7 @@ function App() {
       {failure && <Notice>{failure.message} <button className="text-button" onClick={() => { setFailure(undefined); void loadAccount() }}>Try again</button></Notice>}
       {account === undefined ? <p role="status">Checking your session…</p>
         : <a className="button primary" href={loginUrl}><Github size={19} /> Continue with GitHub <ArrowRight size={17} /></a>}
+      <a className="button signin-demo-link" href="/demo"><Github size={17}/> Explore public demo <ArrowRight size={16}/></a>
       <p className="signin-note"><LockKeyhole size={15} /> Repository metadata access only</p>
     </section>
   </main>
