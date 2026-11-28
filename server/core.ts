@@ -1,5 +1,7 @@
 export interface Env {
   OAUTH_DIAGNOSTICS?: string
+  PUBLIC_REPOSITORY_CACHE: DurableObjectNamespace
+  PUBLIC_REPOSITORY_CACHE_TTL_SECONDS?: string
   DB: D1Database
   APP_BASE_URL: string
   GITHUB_APP_SLUG: string

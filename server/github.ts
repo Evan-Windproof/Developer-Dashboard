@@ -78,7 +78,7 @@ function logOAuth(stage: OAuthStage, url: string, details: object) {
   console.info('GitHub OAuth diagnostic', { stage, hostname, path: pathname, ...details })
 }
 
-async function call(url: string, init: RequestInit, oauthCall = false, stage?: OAuthStage) {
+async function call(url: string, init: RequestInit, oauthCall = false, stage?: OAuthStage, allowNotFound = false) {
   let response: Response
   try {
     // Workers support manual redirects. Keep credentials on the original host.
@@ -109,7 +109,7 @@ async function call(url: string, init: RequestInit, oauthCall = false, stage?: O
       Number.isFinite(delay) ? Math.max(1, Math.ceil(delay)) : 60)
   }
   if (!response.ok) {
-    if (oauthCall && response.status === 400) return response
+    if ((oauthCall && response.status === 400) || (allowNotFound && response.status === 404)) return response
     if (response.status === 401) throw new ApiError(401, 'GITHUB_REAUTH', 'Reconnect your GitHub account.')
     if (response.status === 403 || response.status === 404) {
       // GitHub may send secondary-limit errors without a remaining count or retry header.
@@ -148,7 +148,7 @@ export async function exchange(env: Env, payload: Record<string, string>, diagno
   }
 }
 
-async function github(path: string, token: string, payload?: object, stage?: OAuthStage) {
+async function github(path: string, token: string, payload?: object, stage?: OAuthStage, allowNotFound = false) {
   return call(`${api}${path}`, {
     method: payload ? 'POST' : 'GET',
     body: payload ? JSON.stringify(payload) : undefined,
@@ -159,7 +159,7 @@ async function github(path: string, token: string, payload?: object, stage?: OAu
       'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'Evan-Developer-Dashboard',
     },
-  }, false, stage)
+  }, false, stage, allowNotFound)
 }
 
 export const githubUser = async (token: string, diagnostics = false) =>
@@ -254,4 +254,27 @@ export async function installationToken(env: Env, id: number) {
     }
     throw error
   }
+}
+
+export async function publicOwnerToken(env: Env, owner: string) {
+  if (!env.GITHUB_APP_ID || !env.GITHUB_PRIVATE_KEY) return undefined
+  let response: Response
+  try {
+    response = await github(`/users/${encodeURIComponent(owner)}/installation`, await appJwt(env), undefined, undefined, true)
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'GITHUB_REAUTH') {
+      throw new ApiError(503, 'GITHUB_APP_CONFIG', 'GitHub rejected the dashboard app credentials.')
+    }
+    throw error
+  }
+  if (response.status === 404) return undefined
+  const data = await response.json<{ id?: number }>().catch(() => null)
+  if (typeof data?.id !== 'number' || !Number.isSafeInteger(data.id) || data.id < 1) {
+    throw new ApiError(502, 'PUBLIC_GITHUB_RESPONSE', 'GitHub returned an unreadable installation.')
+  }
+  const token = await installationToken(env, data.id)
+  if (typeof token !== 'string' || !token) {
+    throw new ApiError(502, 'PUBLIC_GITHUB_RESPONSE', 'GitHub returned an unreadable installation token.')
+  }
+  return token
 }

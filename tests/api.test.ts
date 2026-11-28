@@ -62,7 +62,7 @@ before(async () => {
   const tagsMigration = await readFile(new URL('../migrations/0002_repository_tags.sql', import.meta.url), 'utf8')
   await db.batch(tagsMigration.split(';').map(statement => statement.trim()).filter(Boolean).map(statement => db.prepare(statement)))
   env = {
-    DB: db, APP_BASE_URL: origin, GITHUB_APP_SLUG: 'example-dashboard',
+    DB: db, PUBLIC_REPOSITORY_CACHE: {} as DurableObjectNamespace, APP_BASE_URL: origin, GITHUB_APP_SLUG: 'example-dashboard',
     GITHUB_APP_ID: '1', GITHUB_CLIENT_ID: 'mock-client-id', GITHUB_CLIENT_SECRET: 'mock-client-secret',
     GITHUB_PRIVATE_KEY: keys.privateKey.export({ format: 'pem', type: 'pkcs1' }).toString(),
     SESSION_ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'),

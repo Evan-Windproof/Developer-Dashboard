@@ -20,6 +20,12 @@ All endpoints use the dashboard origin. JSON successes use `{ "data": ... }`. JS
 
 All mutations require an `Origin` matching `APP_BASE_URL`. Tag creation and updates accept JSON. Other mutations accept no request body. Stale access snapshots return empty lists and 404 for details until a successful sync.
 
+## Public repository cache
+
+Set the optional Worker variable `PUBLIC_REPOSITORY_CACHE_TTL_SECONDS` to a whole number from 1 to 86399. It defaults to 600 seconds. The Worker can serve the last successful public snapshot for up to 24 hours while refreshing in the background or backing off after an upstream failure. If no usable snapshot is available, a GitHub rate limit returns HTTP 429 with `Retry-After`. Other upstream errors return an error response.
+
+A single Cloudflare Durable Object stores the snapshot and coordinates refreshes across Worker locations. This cache is separate from the dashboard’s D1 database.
+
 ## Repository list parameters
 
 | Parameter | Values |

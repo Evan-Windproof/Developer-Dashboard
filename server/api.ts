@@ -2,7 +2,7 @@ import { deleteTag, listTags, saveTag } from './tags.ts'
 import { ApiError, appOrigin, cookie, json, readCookie, redirect, requireSameOrigin, type Env } from './core.ts'
 import { consumeState, createState, loginCallback, loginStart, logout, session } from './auth.ts'
 import { associateInstallation, listInstallations, overview, repositoryDetail, repositoryList, setRepositoryTag, synchronize } from './repositories.ts'
-import { publicRepositoryList } from './public.ts'
+import { publicRepositoryResponse } from './public.ts'
 
 const routes = new Map([
   ['/api/health', 'GET'],
@@ -64,7 +64,10 @@ export async function handleApi(request: Request, env: Env) {
     }
     if (path === '/api/auth/github/start') return security(await loginStart(request, env))
     if (loginReturn) return security(await loginCallback(request, env, url))
-    if (path === '/api/public/repositories') return security(json(await publicRepositoryList()), 'public, max-age=60, s-maxage=300')
+    if (path === '/api/public/repositories') {
+      const response = await publicRepositoryResponse(env)
+      return security(response, response.ok ? 'public, max-age=0, must-revalidate' : 'no-store')
+    }
     const current = await session(request, env)
     if (path === '/api/auth/logout') {
       await logout(env, current)

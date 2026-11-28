@@ -2,7 +2,7 @@
 
 ## Public demo boundary
 
-`GET /api/public/repositories` is the only unauthenticated data endpoint. It reads the fixed public GitHub account `Evan-Windproof`, filters out private repositories, and returns an allowlist of public repository metadata only. It does not query D1, access GitHub App credentials, or return personal tags. All personal dashboard endpoints remain session-protected.
+`GET /api/public/repositories` is the only unauthenticated data endpoint. It reads the fixed public GitHub account `Evan-Windproof`, filters out private repositories, and returns an allowlist of public repository metadata only. The Worker uses a Metadata-read GitHub App installation token when the App is installed on that account. Otherwise, it uses the unauthenticated GitHub public endpoint. The Worker keeps credentials server-side and caches only public metadata. This endpoint never queries D1 or returns personal tags. All personal dashboard endpoints remain session-protected.
 
 ## Authentication and sessions
 
