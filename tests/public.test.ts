@@ -5,6 +5,23 @@ import type {Env} from '../server/core.ts'
 const origin='https://dashboard.example'
 const env={APP_BASE_URL:origin} as Env
 const request=(path:string,method='GET')=>handleApi(new Request(origin+path,{method}),env)
+test('public upstream failures log sanitized diagnostics and preserve the API response', async t => {
+ const log = t.mock.method(console, 'warn', () => {})
+ const response = { message: 'API rate limit exceeded for sensitive-test-value' }
+ t.mock.method(globalThis, 'fetch', async () => Response.json(response, {
+  status: 403, headers: { 'x-ratelimit-remaining': '0', 'retry-after': '60', 'x-ratelimit-reset': 'invalid-test-value' },
+ }))
+ const result = await request('/api/public/repositories')
+ assert.equal(result.status, 503)
+ assert.equal(result.headers.get('Cache-Control'), 'no-store')
+ assert.deepEqual(await result.json(), { error: {
+  code: 'PUBLIC_GITHUB_UNAVAILABLE', message: 'GitHub could not provide public repository data. Try again shortly.',
+ } })
+ assert.deepEqual(log.mock.calls[0].arguments, ['Public GitHub repository request failed', {
+  upstreamStatus: 403, category: 'primary_rate_limit', rateLimitRemaining: 0, rateLimitReset: null, retryAfterSeconds: 60,
+ }])
+})
+
 test('public demo exposes only public allowlisted metadata without a session',async t=>{
  t.mock.method(globalThis,'fetch',async()=>Response.json([{id:1,name:'public',full_name:'Evan-Windproof/public',owner:{login:'Evan-Windproof'},html_url:'https://github.com/Evan-Windproof/public',private:false,description:'Public',language:'C',stargazers_count:3,forks_count:1,open_issues_count:0,archived:false,fork:false,permissions:{admin:true}},{id:2,name:'private',full_name:'Evan-Windproof/private',owner:{login:'Evan-Windproof'},private:true}]))
  const r=await request('/api/public/repositories');assert.equal(r.status,200)
