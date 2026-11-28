@@ -2,9 +2,11 @@ import { deleteTag, listTags, saveTag } from './tags.ts'
 import { ApiError, appOrigin, cookie, json, readCookie, redirect, requireSameOrigin, type Env } from './core.ts'
 import { consumeState, createState, loginCallback, loginStart, logout, session } from './auth.ts'
 import { associateInstallation, listInstallations, overview, repositoryDetail, repositoryList, setRepositoryTag, synchronize } from './repositories.ts'
+import { publicRepositoryList } from './public.ts'
 
 const routes = new Map([
   ['/api/health', 'GET'],
+  ['/api/public/repositories', 'GET'],
   ['/api/auth/github/start', 'GET'],
   ['/api/auth/github/callback', 'GET'],
   ['/api/auth/logout', 'POST'],
@@ -62,6 +64,7 @@ export async function handleApi(request: Request, env: Env) {
     }
     if (path === '/api/auth/github/start') return security(await loginStart(request, env))
     if (loginReturn) return security(await loginCallback(request, env, url))
+    if (path === '/api/public/repositories') return security(json(await publicRepositoryList()), 'public, max-age=60, s-maxage=300')
     const current = await session(request, env)
     if (path === '/api/auth/logout') {
       await logout(env, current)
