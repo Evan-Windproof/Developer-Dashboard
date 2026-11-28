@@ -163,6 +163,7 @@ dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
 .signin-card h1 { margin-top: 18px; }
 .signin-card p { color: var(--muted); margin-top: 12px; }
 .signin-card .button { margin-top: 21px; min-height: 42px; padding-inline: 14px; }
+.signin-card .signin-demo-link { margin-top: 9px; }
 .signin-card .notice { margin: 13px 0 0; }
 .signin-card .signin-note { display: flex; gap: 6px; align-items: center; margin-top: 16px; font-size: 12px; }
 @media (prefers-reduced-motion: no-preference) {
