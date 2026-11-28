@@ -5,6 +5,7 @@ All endpoints use the dashboard origin. JSON successes use `{ "data": ... }`. JS
 | Method | Path | Behavior |
 | --- | --- | --- |
 | GET | `/api/health` | Checks the D1 binding and returns `{"data":{"status":"ok"}}`. |
+| GET | `/api/public/repositories` | Unauthenticated, read-only list of Evan Windproof’s public repositories. Returns allowlisted metadata only. |
 | GET | `/api/auth/github/start` | Starts browser authorization and sets the login state cookie. |
 | GET | `/api/auth/github/callback` | Consumes state, exchanges the code, and establishes a session. Redirects to the dashboard. |
 | POST | `/api/auth/logout` | Deletes the current session and expires its cookie. |
