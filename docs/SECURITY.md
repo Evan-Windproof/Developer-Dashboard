@@ -1,5 +1,9 @@
 # Security
 
+## Public demo boundary
+
+`GET /api/public/repositories` is the only unauthenticated data endpoint. It reads the fixed public GitHub account `Evan-Windproof`, filters out private repositories, and returns an allowlist of public repository metadata only. It does not query D1, access GitHub App credentials, or return personal tags. All personal dashboard endpoints remain session-protected.
+
 ## Authentication and sessions
 
 Login and installation callbacks require a random state value, the matching HttpOnly browser cookie, and an unexpired hash in D1. Each callback consumes its state with a single conditional delete. Installation state is also bound to the current session. GitHub's user installations endpoint verifies access to the installation before D1 associates it with the user. GitHub sign-in also uses an S256 PKCE challenge with a verifier held in the login cookie.
