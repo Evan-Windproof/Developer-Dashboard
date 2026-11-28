@@ -19,8 +19,8 @@ const routes = new Map([
   ['/api/repositories/sync', 'POST'],
 ])
 
-function security(response: Response) {
-  response.headers.set('Cache-Control', 'no-store')
+function security(response: Response, cacheControl = 'no-store') {
+  response.headers.set('Cache-Control', cacheControl)
   response.headers.set('X-Content-Type-Options', 'nosniff')
   response.headers.set('X-Frame-Options', 'DENY')
   response.headers.set('Referrer-Policy', 'no-referrer')

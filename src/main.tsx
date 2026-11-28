@@ -307,7 +307,7 @@ function PublicDemo({ themeToggle }: { themeToggle: ReactNode }) {
   </main></div>
 }
 function App() {
-  const demoMode=location.pathname==='/demo'
+  const demoMode = location.pathname === '/demo' || location.pathname === '/demo/'
   const [account, setAccount] = useState<Account | null>()
   const [tags, setTags] = useState<Tag[]>([])
   const [managingTags, setManagingTags] = useState(false)
